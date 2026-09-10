@@ -74,6 +74,13 @@ const schema = z.object({
   INTERNAL_SECRET: required("INTERNAL_SECRET"),
   /** Optional dedicated secret for cron endpoints (S-06.07 onwards). */
   INTERNAL_CRON_SECRET: z.string().optional().default(""),
+  /**
+   * Bearer secret pra POST /api/v1/tenants/provision (integração Clinicfx).
+   * Opcional e vazio por default: instalação self-host que não usa a
+   * integração não precisa configurar nada, e a rota fica fail-closed (401)
+   * enquanto a env não for preenchida.
+   */
+  DESKCOMM_PROVISIONING_SECRET: z.string().optional().default(""),
 
   /**
    * Retenção do arquivo do corpo cru dos webhooks (`webhook_events_log`).

@@ -74,15 +74,34 @@ export function extractBearer(authHeader: string | null): string | null {
   return m[1]!.trim();
 }
 
-export async function validateBearerToken(
-  authHeader: string | null,
-): Promise<McpAuthResult> {
-  const plaintext = extractBearer(authHeader);
-  if (!plaintext) {
-    throw new McpAuthError(-32001, 401, "Missing or malformed Authorization header.");
+/** Por que um `dsk_...` não validou — neutro, sem código MCP nem HTTP status. */
+export class ApiTokenError extends Error {
+  constructor(
+    public readonly reason: "malformed" | "not_found" | "revoked" | "expired" | "lookup_failed",
+    message: string,
+  ) {
+    super(message);
+    this.name = "ApiTokenError";
   }
+}
+
+export interface ResolvedApiToken {
+  id: string;
+  organizationId: string;
+  scopes: string[];
+}
+
+/**
+ * Núcleo de validação de um bearer `dsk_...`: hash SHA256 → lookup em
+ * `api_tokens` → checagem de `revoked_at`/`expires_at`. Extraído de
+ * `validateBearerToken` pra ser reusado por qualquer consumidor de
+ * `api_tokens` que não seja o MCP — hoje `lib/tenant-auth.ts` (rotas
+ * `/api/v1/crm/*` da integração Clinicfx). Efeito colateral idêntico ao de
+ * antes: atualiza `last_used_at` fire-and-forget.
+ */
+export async function resolveApiToken(plaintext: string): Promise<ResolvedApiToken> {
   if (!plaintext.startsWith("dsk_")) {
-    throw new McpAuthError(-32001, 401, "Invalid token format.");
+    throw new ApiTokenError("malformed", "Invalid token format.");
   }
 
   const tokenHash = createHash("sha256").update(plaintext).digest();
@@ -96,21 +115,17 @@ export async function validateBearerToken(
     .maybeSingle();
 
   if (error) {
-    throw new McpAuthError(-32603, 500, `Token lookup failed: ${error.message}`);
+    throw new ApiTokenError("lookup_failed", `Token lookup failed: ${error.message}`);
   }
   if (!data) {
-    throw new McpAuthError(-32001, 401, "Token not recognized.");
+    throw new ApiTokenError("not_found", "Token not recognized.");
   }
   if (data.revoked_at) {
-    throw new McpAuthError(-32001, 401, "Token revoked.");
+    throw new ApiTokenError("revoked", "Token revoked.");
   }
   if (data.expires_at && new Date(data.expires_at) < new Date()) {
-    throw new McpAuthError(-32001, 401, "Token expired.");
+    throw new ApiTokenError("expired", "Token expired.");
   }
-
-  const scopes = parseScopes(data.scopes);
-  const role = scopesRole(scopes);
-  const actor = deriveActor(scopes, data.id);
 
   supabase
     .from("api_tokens")
@@ -120,12 +135,40 @@ export async function validateBearerToken(
       if (updErr) console.error("[mcp.auth] last_used_at update failed", updErr.message);
     });
 
+  return { id: data.id, organizationId: data.organization_id, scopes: parseScopes(data.scopes) };
+}
+
+export async function validateBearerToken(
+  authHeader: string | null,
+): Promise<McpAuthResult> {
+  const plaintext = extractBearer(authHeader);
+  if (!plaintext) {
+    throw new McpAuthError(-32001, 401, "Missing or malformed Authorization header.");
+  }
+
+  let resolved: ResolvedApiToken;
+  try {
+    resolved = await resolveApiToken(plaintext);
+  } catch (err) {
+    if (err instanceof ApiTokenError) {
+      throw new McpAuthError(
+        err.reason === "lookup_failed" ? -32603 : -32001,
+        err.reason === "lookup_failed" ? 500 : 401,
+        err.message,
+      );
+    }
+    throw err;
+  }
+
+  const role = scopesRole(resolved.scopes);
+  const actor = deriveActor(resolved.scopes, resolved.id);
+
   return {
-    organizationId: data.organization_id,
+    organizationId: resolved.organizationId,
     role,
     actor,
-    apiTokenId: data.id,
-    scopes,
+    apiTokenId: resolved.id,
+    scopes: resolved.scopes,
   };
 }
 

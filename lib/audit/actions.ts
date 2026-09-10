@@ -457,6 +457,9 @@ export const AUDIT_ACTIONS = [
   "crm_task.updated",
   "crm_task.deleted",
   "organization.switched",
+
+  /** POST /api/v1/tenants/provision — tenant criado (ou replay idempotente) via integração Clinicfx. */
+  "tenant.created_by_clinicfx_provisioning",
 ] as const;
 
 /** Um código de auditoria. Derivado de `AUDIT_ACTIONS` — não redigite a lista. */
