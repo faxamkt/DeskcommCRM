@@ -15,6 +15,14 @@ export const PUBLIC_PATHS: RegExp[] = [
   /^\/api\/v1\/health$/,
   /^\/api\/v1\/webhooks\//,
   /^\/api\/v1\/cron\//,
+  // Integração Clinicfx: auth própria (Bearer DESKCOMM_PROVISIONING_SECRET no
+  // provisionamento, X-Api-Key de tenant em /crm/*, ver lib/tenant-auth.ts) —
+  // sem cookie de sessão, mesma natureza de /webhooks/ e /cron/ acima. SEM esta
+  // entrada o proxy devolve 401 "unauthenticated" antes da rota rodar sua
+  // própria checagem, e a integração inteira fica inacessível independente do
+  // header enviado — foi exatamente o que aconteceu até esta linha existir.
+  /^\/api\/v1\/tenants\/provision$/,
+  /^\/api\/v1\/crm\//,
   // Heartbeat do agente do host (bearer INTERNAL_SECRET/INTERNAL_CRON_SECRET,
   // checado dentro da própria rota) — sem cookie de sessão, igual /cron/.
   /^\/api\/v1\/system\/agent$/,

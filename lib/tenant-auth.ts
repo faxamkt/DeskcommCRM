@@ -15,6 +15,13 @@ export interface TenantApiKeyAuth {
   organization_id: string;
   role: Role;
   api_token_id: string;
+  /**
+   * `api_tokens.created_by` — quem provisionou este token (o dono do tenant).
+   * Usado como autor de escrita em tabelas que exigem `created_by_user_id`
+   * (ex.: `message_templates`, `webhook_sources`) quando quem grava é a
+   * integração Clinicfx, não uma pessoa com sessão de cookie.
+   */
+  created_by: string | null;
 }
 
 function scopesRole(scopes: string[]): Role {
@@ -34,6 +41,7 @@ export async function autenticarApiKey(request: Request): Promise<TenantApiKeyAu
       organization_id: resolved.organizationId,
       role: scopesRole(resolved.scopes),
       api_token_id: resolved.id,
+      created_by: resolved.createdBy,
     };
   } catch (err) {
     if (err instanceof ApiTokenError) return null;
