@@ -10,6 +10,15 @@ import {
 
 const COOKIE_NAME = "sb-deskcomm-auth";
 
+/**
+ * Origens do navegador que chamam `/api/v1/crm/*` e `/api/v1/tenants/provision`
+ * DIRETO (integração Clinicfx, sem cookie de sessão — auth por X-Api-Key/Bearer
+ * dentro da própria rota). Sem CORS aqui o navegador barra a resposta antes de
+ * ela chegar em quem chamou; o sintoma nunca é um erro visível, é sempre "fica
+ * carregando pra sempre" — o servidor respondeu 200 e o navegador descartou.
+ */
+const CLINICFX_ORIGINS = new Set(["https://clinicfx.app", "http://localhost:8080"]);
+
 export async function proxy(request: NextRequest) {
   const response = NextResponse.next({ request: { headers: request.headers } });
 
@@ -28,6 +37,24 @@ export async function proxy(request: NextRequest) {
   // exists as documentation of the intended deploy topology.
   const host = request.headers.get("host") ?? "";
   const isAdminSurface = host.startsWith("admin.") || pathname.startsWith("/admin");
+
+  const isClinicfxIntegrationPath =
+    pathname.startsWith("/api/v1/crm/") || pathname === "/api/v1/tenants/provision";
+  if (isClinicfxIntegrationPath) {
+    const origin = request.headers.get("origin");
+    if (origin && CLINICFX_ORIGINS.has(origin)) {
+      response.headers.set("Access-Control-Allow-Origin", origin);
+      response.headers.append("Vary", "Origin");
+      response.headers.set("Access-Control-Allow-Headers", "X-Api-Key, Content-Type, Authorization");
+      response.headers.set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS");
+      response.headers.set("Access-Control-Max-Age", "86400");
+    }
+    // Preflight: navegador não manda X-Api-Key aqui, então nunca passaria pela
+    // auth da rota — responde direto, sem tocar em sessão/cookie.
+    if (request.method === "OPTIONS") {
+      return new NextResponse(null, { status: 204, headers: response.headers });
+    }
+  }
 
   if (isPublicPath(pathname)) {
     return response;
