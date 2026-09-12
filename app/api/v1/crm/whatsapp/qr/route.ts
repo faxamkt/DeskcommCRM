@@ -10,7 +10,10 @@
  * `/api/v1/onboarding/whatsapp/session`) exige `auth.uid()` de sessão de
  * cookie e não serve aqui. Por isso esta rota cria o `channel_sessions` e
  * inicia a sessão remota na PRIMEIRA chamada sem canal, em vez de devolver
- * 404 pra sempre — mesma lógica de `/api/v1/crm/kanban` pro funil.
+ * 404 pra sempre — mesma lógica de `/api/v1/crm/kanban` pro funil. Também
+ * repara um canal que ficou `FAILED` (ex.: nomes antigos, gerados antes da
+ * correção do limite de tamanho do WAHA, que nunca chegavam a existir de
+ * verdade lá) em vez de tentar buscar QR de uma sessão que não existe.
  */
 import { randomUUID } from "node:crypto";
 import type { NextRequest } from "next/server";
@@ -20,25 +23,58 @@ import { STATUS_SAUDAVEL } from "@/lib/channels/health";
 import { loadPrimaryChannelSession, type PrimaryChannelSession } from "@/lib/channels/primary-session";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { autenticarApiKey } from "@/lib/tenant-auth";
-import { getWahaClient } from "@/lib/waha/client";
+import { getWahaClient, type WahaClient } from "@/lib/waha/client";
 
 export const dynamic = "force-dynamic";
+
+/** Cria/inicia a sessão remota na WAHA pro canal já existente no banco e persiste o status resultante. */
+async function iniciarSessaoRemota(
+  admin: ReturnType<typeof createAdminClient>,
+  waha: WahaClient,
+  channelId: string,
+  sessionName: string,
+): Promise<PrimaryChannelSession> {
+  try {
+    await waha.createSession(sessionName);
+    const remote = await waha.startExistingSession(sessionName);
+    const { data: updated, error } = await admin
+      .from("channel_sessions")
+      .update({ status: remote.status, status_reason: null, last_status_change_at: new Date().toISOString() })
+      .eq("id", channelId)
+      .select("id, status, phone_number, waha_session_name")
+      .single();
+    if (error || !updated) throw new Error(error?.message ?? "update sem retorno");
+    return updated as PrimaryChannelSession;
+  } catch (err) {
+    await admin.from("channel_sessions").update({ status: "FAILED", status_reason: "connection_repair_required" }).eq("id", channelId);
+    throw new Error(`falha ao iniciar a sessão do WhatsApp: ${err instanceof Error ? err.message : "erro desconhecido"}`);
+  }
+}
 
 async function garantirCanalWhatsapp(
   admin: ReturnType<typeof createAdminClient>,
   organizationId: string,
 ): Promise<PrimaryChannelSession | null> {
-  const existente = await loadPrimaryChannelSession(admin, organizationId);
-  if (existente) return existente;
-
   const waha = getWahaClient();
   if (!waha) return null; // sem WAHA configurado, nem tenta — a rota já trata isso a seguir
 
   // WAHA rejeita (400) nomes de sessão longos — medido nesta instalação: 50
   // chars passa, 55 já não. "org_" + uuid sem hífen (32) = 36 chars, com
-  // folga. Um org só tem um canal "primário" aqui (é o que `garantirCanalWhatsapp`
-  // garante), então não precisa de sufixo aleatório pra unicidade.
+  // folga. Um org só tem um canal "primário" aqui, então não precisa de
+  // sufixo aleatório pra unicidade.
   const sessionName = `org_${organizationId.replace(/-/g, "")}`;
+
+  const existente = await loadPrimaryChannelSession(admin, organizationId);
+  if (existente) {
+    if (existente.status !== "FAILED") return existente;
+    // Repara: se o nome salvo é de antes da correção do limite (>50 chars,
+    // nunca existiu de verdade na WAHA), corrige antes de tentar de novo.
+    if (existente.waha_session_name !== sessionName) {
+      await admin.from("channel_sessions").update({ waha_session_name: sessionName }).eq("id", existente.id);
+    }
+    return iniciarSessaoRemota(admin, waha, existente.id, sessionName);
+  }
+
   const { data: created, error: insertErr } = await admin
     .from("channel_sessions")
     .insert({
@@ -57,20 +93,7 @@ async function garantirCanalWhatsapp(
     throw new Error(`falha ao criar o canal do WhatsApp: ${insertErr?.message ?? "insert sem retorno"}`);
   }
 
-  try {
-    await waha.createSession(sessionName);
-    const remote = await waha.startExistingSession(sessionName);
-    const { data: updated } = await admin
-      .from("channel_sessions")
-      .update({ status: remote.status, last_status_change_at: new Date().toISOString() })
-      .eq("id", created.id)
-      .select("id, status, phone_number, waha_session_name")
-      .single();
-    return (updated ?? created) as PrimaryChannelSession;
-  } catch (err) {
-    await admin.from("channel_sessions").update({ status: "FAILED", status_reason: "connection_repair_required" }).eq("id", created.id);
-    throw new Error(`falha ao iniciar a sessão do WhatsApp: ${err instanceof Error ? err.message : "erro desconhecido"}`);
-  }
+  return iniciarSessaoRemota(admin, waha, created.id, sessionName);
 }
 
 export async function GET(req: NextRequest): Promise<Response> {
