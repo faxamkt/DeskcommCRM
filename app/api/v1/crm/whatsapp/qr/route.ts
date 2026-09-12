@@ -3,17 +3,73 @@
  * Clinicfx exibir na própria UI (por isso base64 em JSON, e não bytes de
  * imagem como o proxy de onboarding — `app/api/v1/onboarding/whatsapp/qr/route.ts`,
  * de onde vem a chamada ao WAHA abaixo). Auth por `X-Api-Key`.
+ *
+ * Self-healing: uma clínica provisionada via Clinicfx nunca passou pelo
+ * onboarding do Deskcomm (não tem login lá), então nunca ganhou um canal
+ * WhatsApp — `fn_reserve_channel_connection` (usado por
+ * `/api/v1/onboarding/whatsapp/session`) exige `auth.uid()` de sessão de
+ * cookie e não serve aqui. Por isso esta rota cria o `channel_sessions` e
+ * inicia a sessão remota na PRIMEIRA chamada sem canal, em vez de devolver
+ * 404 pra sempre — mesma lógica de `/api/v1/crm/kanban` pro funil.
  */
 import { randomUUID } from "node:crypto";
 import type { NextRequest } from "next/server";
 
 import { fail, ok } from "@/lib/api/wrappers";
 import { STATUS_SAUDAVEL } from "@/lib/channels/health";
-import { loadPrimaryChannelSession } from "@/lib/channels/primary-session";
+import { loadPrimaryChannelSession, type PrimaryChannelSession } from "@/lib/channels/primary-session";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { autenticarApiKey } from "@/lib/tenant-auth";
+import { getWahaClient } from "@/lib/waha/client";
 
 export const dynamic = "force-dynamic";
+
+async function garantirCanalWhatsapp(
+  admin: ReturnType<typeof createAdminClient>,
+  organizationId: string,
+): Promise<PrimaryChannelSession | null> {
+  const existente = await loadPrimaryChannelSession(admin, organizationId);
+  if (existente) return existente;
+
+  const waha = getWahaClient();
+  if (!waha) return null; // sem WAHA configurado, nem tenta — a rota já trata isso a seguir
+
+  const sessionName = `org_${organizationId.replace(/-/g, "")}_${randomUUID().replace(/-/g, "")}`;
+  const { data: created, error: insertErr } = await admin
+    .from("channel_sessions")
+    .insert({
+      organization_id: organizationId,
+      waha_session_name: sessionName,
+      engine: "NOWEB",
+      // Mesmo placeholder que fn_reserve_channel_connection usa pro fluxo de
+      // onboarding — o segredo real do webhook não é usado por este caminho.
+      webhook_secret_encrypted: "\\x00",
+      status: "STARTING",
+      metadata: { onboarding: true, provisioned_via: "clinicfx" },
+    })
+    .select("id, status, phone_number, waha_session_name")
+    .single();
+  if (insertErr || !created) {
+    console.error("[crm.whatsapp.qr] criação do canal falhou", insertErr?.message);
+    return null;
+  }
+
+  try {
+    await waha.createSession(sessionName);
+    const remote = await waha.startExistingSession(sessionName);
+    const { data: updated } = await admin
+      .from("channel_sessions")
+      .update({ status: remote.status, last_status_change_at: new Date().toISOString() })
+      .eq("id", created.id)
+      .select("id, status, phone_number, waha_session_name")
+      .single();
+    return (updated ?? created) as PrimaryChannelSession;
+  } catch (err) {
+    console.error("[crm.whatsapp.qr] início da sessão WAHA falhou", err);
+    await admin.from("channel_sessions").update({ status: "FAILED", status_reason: "connection_repair_required" }).eq("id", created.id);
+    return null;
+  }
+}
 
 export async function GET(req: NextRequest): Promise<Response> {
   const requestId = randomUUID();
@@ -21,13 +77,13 @@ export async function GET(req: NextRequest): Promise<Response> {
   if (!auth) return fail("unauthorized", "API key inválida.", 401, { requestId });
 
   const admin = createAdminClient();
-  let channel;
+  let channel: PrimaryChannelSession | null;
   try {
-    channel = await loadPrimaryChannelSession(admin, auth.organization_id);
+    channel = await garantirCanalWhatsapp(admin, auth.organization_id);
   } catch (err) {
     return fail("internal_error", err instanceof Error ? err.message : "erro", 500, { requestId });
   }
-  if (!channel) return fail("resource_not_found", "Nenhum canal WhatsApp conectado.", 404, { requestId });
+  if (!channel) return fail("nao_configurado", "WAHA não configurado nesta instalação.", 503, { requestId });
   if (channel.status === STATUS_SAUDAVEL) return ok({ conectado: true }, { requestId });
 
   const baseUrl = process.env.WAHA_API_BASE_URL;
