@@ -27,14 +27,22 @@ import { getWahaClient, type WahaClient } from "@/lib/waha/client";
 
 export const dynamic = "force-dynamic";
 
-/** Cria/inicia a sessão remota na WAHA pro canal já existente no banco e persiste o status resultante. */
+/**
+ * Cria/inicia a sessão remota na WAHA pro canal já existente no banco e
+ * persiste o status resultante. `repararExistente` apaga a sessão remota
+ * antes de recriar — medido nesta instalação: uma sessão em `FAILED` NÃO sai
+ * desse estado só com create+start de novo (start rejeita porque o status
+ * pós-start continua FAILED); precisa nascer do zero.
+ */
 async function iniciarSessaoRemota(
   admin: ReturnType<typeof createAdminClient>,
   waha: WahaClient,
   channelId: string,
   sessionName: string,
+  repararExistente = false,
 ): Promise<PrimaryChannelSession> {
   try {
+    if (repararExistente) await waha.deleteSession(sessionName).catch(() => { /* pode nunca ter existido de verdade */ });
     await waha.createSession(sessionName);
     const remote = await waha.startExistingSession(sessionName);
     const { data: updated, error } = await admin
@@ -72,7 +80,7 @@ async function garantirCanalWhatsapp(
     if (existente.waha_session_name !== sessionName) {
       await admin.from("channel_sessions").update({ waha_session_name: sessionName }).eq("id", existente.id);
     }
-    return iniciarSessaoRemota(admin, waha, existente.id, sessionName);
+    return iniciarSessaoRemota(admin, waha, existente.id, sessionName, true);
   }
 
   const { data: created, error: insertErr } = await admin
