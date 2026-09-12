@@ -23,6 +23,7 @@ const querySchema = z.object({
 
 interface ConversationRow {
   id: string;
+  contact_id: string;
   status: string;
   last_message_preview: string | null;
   last_message_at: string | null;
@@ -52,7 +53,7 @@ export async function GET(req: NextRequest): Promise<Response> {
   const admin = createAdminClient();
   const { data, error } = await admin
     .from("conversations")
-    .select("id, status, last_message_preview, last_message_at, created_at, contacts(name, display_name, phone_number, avatar_storage_path, is_anonymized)")
+    .select("id, contact_id, status, last_message_preview, last_message_at, created_at, contacts(name, display_name, phone_number, avatar_storage_path, is_anonymized)")
     .eq("organization_id", auth.organization_id)
     .order("last_message_at", { ascending: false, nullsFirst: false })
     .range(from, to);
@@ -66,8 +67,10 @@ export async function GET(req: NextRequest): Promise<Response> {
 
   const conversas = linhas.map((c) => ({
     id: c.id,
+    contact_id: c.contact_id,
     nome_contato: c.contacts?.display_name || c.contacts?.name
       || (c.contacts?.phone_number ? normalizePhoneForDisplay(c.contacts.phone_number) : null),
+    telefone: c.contacts?.phone_number ? normalizePhoneForDisplay(c.contacts.phone_number) : null,
     foto_url: c.contacts?.avatar_storage_path && !c.contacts.is_anonymized
       ? fotos.get(c.contacts.avatar_storage_path) ?? null
       : null,
