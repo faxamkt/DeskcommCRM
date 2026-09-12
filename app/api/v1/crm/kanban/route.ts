@@ -12,6 +12,7 @@ import { fail, ok } from "@/lib/api/wrappers";
 import { autenticarApiKey } from "@/lib/tenant-auth";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { assinarFotosDeContatos } from "@/lib/contacts/foto-assinada";
+import { normalizePhoneForDisplay } from "@/lib/messaging/contact-card";
 
 export const dynamic = "force-dynamic";
 
@@ -23,6 +24,7 @@ interface LeadRow {
   contacts: {
     name: string | null;
     display_name: string | null;
+    phone_number: string | null;
     avatar_storage_path: string | null;
     is_anonymized: boolean | null;
   } | null;
@@ -115,7 +117,7 @@ export async function GET(req: NextRequest): Promise<Response> {
 
   const { data: leads, error: leadsErr } = await admin
     .from("crm_leads")
-    .select("id, stage_id, last_activity_at, created_at, contacts(name, display_name, avatar_storage_path, is_anonymized)")
+    .select("id, stage_id, last_activity_at, created_at, contacts(name, display_name, phone_number, avatar_storage_path, is_anonymized)")
     .eq("organization_id", auth.organization_id)
     .eq("pipeline_id", pipeline.id)
     .eq("status", "open")
@@ -140,7 +142,8 @@ export async function GET(req: NextRequest): Promise<Response> {
     nome: stage.name,
     cards: (leadsByStage.get(stage.id) ?? []).map((lead) => ({
       id: lead.id,
-      nome_contato: lead.contacts?.display_name || lead.contacts?.name || null,
+      nome_contato: lead.contacts?.display_name || lead.contacts?.name
+        || (lead.contacts?.phone_number ? normalizePhoneForDisplay(lead.contacts.phone_number) : null),
       foto_url: lead.contacts?.avatar_storage_path && !lead.contacts.is_anonymized
         ? fotos.get(lead.contacts.avatar_storage_path) ?? null
         : null,

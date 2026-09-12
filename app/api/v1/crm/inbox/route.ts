@@ -11,6 +11,7 @@ import { fail, ok } from "@/lib/api/wrappers";
 import { autenticarApiKey } from "@/lib/tenant-auth";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { assinarFotosDeContatos } from "@/lib/contacts/foto-assinada";
+import { normalizePhoneForDisplay } from "@/lib/messaging/contact-card";
 
 export const dynamic = "force-dynamic";
 
@@ -29,6 +30,7 @@ interface ConversationRow {
   contacts: {
     name: string | null;
     display_name: string | null;
+    phone_number: string | null;
     avatar_storage_path: string | null;
     is_anonymized: boolean | null;
   } | null;
@@ -50,7 +52,7 @@ export async function GET(req: NextRequest): Promise<Response> {
   const admin = createAdminClient();
   const { data, error } = await admin
     .from("conversations")
-    .select("id, status, last_message_preview, last_message_at, created_at, contacts(name, display_name, avatar_storage_path, is_anonymized)")
+    .select("id, status, last_message_preview, last_message_at, created_at, contacts(name, display_name, phone_number, avatar_storage_path, is_anonymized)")
     .eq("organization_id", auth.organization_id)
     .order("last_message_at", { ascending: false, nullsFirst: false })
     .range(from, to);
@@ -64,7 +66,8 @@ export async function GET(req: NextRequest): Promise<Response> {
 
   const conversas = linhas.map((c) => ({
     id: c.id,
-    nome_contato: c.contacts?.display_name || c.contacts?.name || null,
+    nome_contato: c.contacts?.display_name || c.contacts?.name
+      || (c.contacts?.phone_number ? normalizePhoneForDisplay(c.contacts.phone_number) : null),
     foto_url: c.contacts?.avatar_storage_path && !c.contacts.is_anonymized
       ? fotos.get(c.contacts.avatar_storage_path) ?? null
       : null,
