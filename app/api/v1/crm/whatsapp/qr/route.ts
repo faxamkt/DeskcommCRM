@@ -34,7 +34,11 @@ async function garantirCanalWhatsapp(
   const waha = getWahaClient();
   if (!waha) return null; // sem WAHA configurado, nem tenta — a rota já trata isso a seguir
 
-  const sessionName = `org_${organizationId.replace(/-/g, "")}_${randomUUID().replace(/-/g, "")}`;
+  // WAHA rejeita (400) nomes de sessão longos — medido nesta instalação: 50
+  // chars passa, 55 já não. "org_" + uuid sem hífen (32) = 36 chars, com
+  // folga. Um org só tem um canal "primário" aqui (é o que `garantirCanalWhatsapp`
+  // garante), então não precisa de sufixo aleatório pra unicidade.
+  const sessionName = `org_${organizationId.replace(/-/g, "")}`;
   const { data: created, error: insertErr } = await admin
     .from("channel_sessions")
     .insert({
@@ -50,8 +54,7 @@ async function garantirCanalWhatsapp(
     .select("id, status, phone_number, waha_session_name")
     .single();
   if (insertErr || !created) {
-    console.error("[crm.whatsapp.qr] criação do canal falhou", insertErr?.message);
-    return null;
+    throw new Error(`falha ao criar o canal do WhatsApp: ${insertErr?.message ?? "insert sem retorno"}`);
   }
 
   try {
@@ -65,9 +68,8 @@ async function garantirCanalWhatsapp(
       .single();
     return (updated ?? created) as PrimaryChannelSession;
   } catch (err) {
-    console.error("[crm.whatsapp.qr] início da sessão WAHA falhou", err);
     await admin.from("channel_sessions").update({ status: "FAILED", status_reason: "connection_repair_required" }).eq("id", created.id);
-    return null;
+    throw new Error(`falha ao iniciar a sessão do WhatsApp: ${err instanceof Error ? err.message : "erro desconhecido"}`);
   }
 }
 
