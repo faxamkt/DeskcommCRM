@@ -89,6 +89,8 @@ export interface ResolvedApiToken {
   id: string;
   organizationId: string;
   scopes: string[];
+  /** `api_tokens.created_by` — quem provisionou o token (dono do tenant, no caso Clinicfx). */
+  createdBy: string | null;
 }
 
 /**
@@ -110,7 +112,7 @@ export async function resolveApiToken(plaintext: string): Promise<ResolvedApiTok
   const supabase = createAdminClient();
   const { data, error } = await supabase
     .from("api_tokens")
-    .select("id, organization_id, scopes, revoked_at, expires_at")
+    .select("id, organization_id, scopes, revoked_at, expires_at, created_by")
     .eq("token_hash", hashLiteral)
     .maybeSingle();
 
@@ -135,7 +137,12 @@ export async function resolveApiToken(plaintext: string): Promise<ResolvedApiTok
       if (updErr) console.error("[mcp.auth] last_used_at update failed", updErr.message);
     });
 
-  return { id: data.id, organizationId: data.organization_id, scopes: parseScopes(data.scopes) };
+  return {
+    id: data.id,
+    organizationId: data.organization_id,
+    scopes: parseScopes(data.scopes),
+    createdBy: (data as { created_by: string | null }).created_by,
+  };
 }
 
 export async function validateBearerToken(
