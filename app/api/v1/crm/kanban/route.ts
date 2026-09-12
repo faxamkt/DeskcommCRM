@@ -11,6 +11,7 @@ import type { NextRequest } from "next/server";
 import { fail, ok } from "@/lib/api/wrappers";
 import { autenticarApiKey } from "@/lib/tenant-auth";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { assinarFotosDeContatos } from "@/lib/contacts/foto-assinada";
 
 export const dynamic = "force-dynamic";
 
@@ -19,7 +20,12 @@ interface LeadRow {
   stage_id: string;
   last_activity_at: string | null;
   created_at: string;
-  contacts: { name: string | null; display_name: string | null } | null;
+  contacts: {
+    name: string | null;
+    display_name: string | null;
+    avatar_storage_path: string | null;
+    is_anonymized: boolean | null;
+  } | null;
 }
 
 /**
@@ -109,15 +115,21 @@ export async function GET(req: NextRequest): Promise<Response> {
 
   const { data: leads, error: leadsErr } = await admin
     .from("crm_leads")
-    .select("id, stage_id, last_activity_at, created_at, contacts(name, display_name)")
+    .select("id, stage_id, last_activity_at, created_at, contacts(name, display_name, avatar_storage_path, is_anonymized)")
     .eq("organization_id", auth.organization_id)
     .eq("pipeline_id", pipeline.id)
     .eq("status", "open")
     .order("position_in_stage", { ascending: true });
   if (leadsErr) return fail("internal_error", leadsErr.message, 500, { requestId });
 
+  const leadRows = (leads ?? []) as unknown as LeadRow[];
+  const fotos = await assinarFotosDeContatos(
+    admin,
+    leadRows.map((l) => (l.contacts?.is_anonymized ? null : l.contacts?.avatar_storage_path)),
+  );
+
   const leadsByStage = new Map<string, LeadRow[]>();
-  for (const lead of (leads ?? []) as unknown as LeadRow[]) {
+  for (const lead of leadRows) {
     const list = leadsByStage.get(lead.stage_id) ?? [];
     list.push(lead);
     leadsByStage.set(lead.stage_id, list);
@@ -129,6 +141,9 @@ export async function GET(req: NextRequest): Promise<Response> {
     cards: (leadsByStage.get(stage.id) ?? []).map((lead) => ({
       id: lead.id,
       nome_contato: lead.contacts?.display_name || lead.contacts?.name || null,
+      foto_url: lead.contacts?.avatar_storage_path && !lead.contacts.is_anonymized
+        ? fotos.get(lead.contacts.avatar_storage_path) ?? null
+        : null,
       etapa: stage.name,
       ultimo_contato: lead.last_activity_at ?? lead.created_at,
     })),
