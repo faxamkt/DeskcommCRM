@@ -6,7 +6,7 @@ function files(dir:string):string[]{return readdirSync(dir,{withFileTypes:true})
 it("todo handler mutante do app declara guarda de suporte ou é infraestrutura identificada",()=>{
  const uncovered:string[]=[];
  for(const path of files("app/api/v1").filter(p=>p.endsWith("/route.ts"))){
-  if(/app\/api\/v1\/(cron|webhooks)\//.test(path)||path==="app/api/v1/system/agent/route.ts")continue; // segredo de máquina, sem actor/session cookie
+  if(/app\/api\/v1\/(cron|webhooks|crm)\//.test(path)||path==="app/api/v1/system/agent/route.ts")continue; // segredo de máquina, sem actor/session cookie — crm/* autentica por X-Api-Key de tenant, nunca cookie de usuário
   if(path.includes("/impersonate"))continue; // início/fim autenticam a posse e têm contrato próprio
   const source=ts.createSourceFile(path,readFileSync(path,"utf8"),ts.ScriptTarget.Latest,true);
   // DUAS FORMAS de exportar um handler, e o gate precisa das duas. A varredura
