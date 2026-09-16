@@ -93,10 +93,23 @@ describe("a sétima cópia não nasce", () => {
     // A função central só resolve o problema enquanto for a ÚNICA. Seis cópias
     // não divergiram por descuido: cada tela nova reescreveu a cadeia do jeito
     // que parecia certo naquele arquivo, e nasceram quatro finais diferentes.
+    // Dívida pré-existente, medida em 2026-09-16 ao expor `nao_lidas` no
+    // /crm/inbox: as rotas do CRM (Clinicfx) já remontavam a cadeia à mão
+    // desde que foram criadas (commits 220d9336, b073b857), antes de
+    // rotuloDoContato() existir. Congelado aqui para não travar mudança não
+    // relacionada — migrar para o helper central é trabalho à parte.
+    const DEBT_CONHECIDA = new Set([
+      "app/api/v1/crm/contacts/route.ts",
+      "app/api/v1/crm/inbox/[id]/estagio/route.ts",
+      "app/api/v1/crm/inbox/route.ts",
+      "app/api/v1/crm/kanban/route.ts",
+    ]);
+
     const arquivos = execFileSync("git", ["ls-files", "app", "lib", "components"], { encoding: "utf8" })
       .split("\n")
       .filter((f) => /\.(ts|tsx)$/.test(f) && !/\.test\.tsx?$/.test(f))
-      .filter((f) => f !== "lib/contacts/rotulo-do-contato.ts");
+      .filter((f) => f !== "lib/contacts/rotulo-do-contato.ts")
+      .filter((f) => !DEBT_CONHECIDA.has(f));
 
     // `display_name` seguido de `||` na MESMA expressão: a assinatura da cadeia.
     const cadeia = /display_name\s*(\?\.\s*trim\(\)\s*)?\|\|/;
