@@ -28,6 +28,7 @@ interface ConversationRow {
   last_message_preview: string | null;
   last_message_at: string | null;
   created_at: string;
+  unread_count_for_assignee: number;
   contacts: {
     name: string | null;
     display_name: string | null;
@@ -53,7 +54,7 @@ export async function GET(req: NextRequest): Promise<Response> {
   const admin = createAdminClient();
   const { data, error } = await admin
     .from("conversations")
-    .select("id, contact_id, status, last_message_preview, last_message_at, created_at, contacts(name, display_name, phone_number, avatar_storage_path, is_anonymized)")
+    .select("id, contact_id, status, last_message_preview, last_message_at, created_at, unread_count_for_assignee, contacts(name, display_name, phone_number, avatar_storage_path, is_anonymized)")
     .eq("organization_id", auth.organization_id)
     .order("last_message_at", { ascending: false, nullsFirst: false })
     .range(from, to);
@@ -77,6 +78,7 @@ export async function GET(req: NextRequest): Promise<Response> {
     ultima_mensagem: c.last_message_preview,
     timestamp: c.last_message_at ?? c.created_at,
     status: c.status,
+    nao_lidas: c.unread_count_for_assignee,
   }));
 
   return ok({ conversas }, { requestId });
