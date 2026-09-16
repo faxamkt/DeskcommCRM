@@ -214,6 +214,20 @@ const KNOWN_DEBT: { reason: string; files: string[] }[] = [
       "a cópia de tela na fonte deixar de nomear o provider.",
     files: ["lib/i18n/dicionario.ts"],
   },
+  {
+    reason:
+      "Dívida nova, medida em 2026-09-16 ao expor `nao_lidas` no /crm/inbox: " +
+      "as rotas de controle de sessão do WhatsApp para o tenant do CRM " +
+      "(`app/api/v1/crm/whatsapp/*`) nomeiam o provider igual às rotas irmãs " +
+      "de `channel-sessions/*` e `onboarding/whatsapp/*` já na lista — mesma " +
+      "natureza de control-plane de sessão, nunca foram adicionadas quando " +
+      "criadas (commit 04f3a190). Saem junto com a Fase 3 do seam de canais, " +
+      "quando essa superfície também migrar para `lib/channels/`.",
+    files: [
+      "app/api/v1/crm/whatsapp/qr/route.ts",
+      "app/api/v1/crm/whatsapp/status/route.ts",
+    ],
+  },
 ];
 
 const DEBT = new Set(KNOWN_DEBT.flatMap((g) => g.files));
