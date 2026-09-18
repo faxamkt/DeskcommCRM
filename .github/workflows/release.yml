@@ -8,12 +8,13 @@ name: release
 #   2. VOCÊ faz merge desse PR → ele cria a tag `vX.Y.Z`, e é a tag que faz o
 #      `publish-image.yml` publicar as três imagens que a VPS puxa.
 #
-# Quem escreve (branch, PR, tag) é o token de um GitHub App, NUNCA o
-# GITHUB_TOKEN. A razão é uma armadilha documentada pelo próprio GitHub: evento
-# disparado com o GITHUB_TOKEN não cria novo workflow run. Se a tag nascesse
-# dele, o `publish-image.yml` jamais rodaria — a tag existiria, ninguém veria
-# erro, e NENHUMA VPS receberia a atualização. Falha silenciosa, descoberta só
-# quando um cliente tentasse atualizar.
+# Quem escreve (branch, PR, tag) é `secrets.RELEASE_APP_TOKEN` — um PAT
+# pessoal neste fork (upstream usa um GitHub App; a propriedade que importa é
+# a mesma) —, NUNCA o GITHUB_TOKEN. A razão é uma armadilha documentada pelo
+# próprio GitHub: evento disparado com o GITHUB_TOKEN não cria novo workflow
+# run. Se a tag nascesse dele, o `publish-image.yml` jamais rodaria — a tag
+# existiria, ninguém veria erro, e NENHUMA VPS receberia a atualização. Falha
+# silenciosa, descoberta só quando um cliente tentasse atualizar.
 #
 # Por isso o ato 2 não confia: ele espera a publicação e CONFERE as três imagens
 # no registro, falhando alto se não aparecerem.
@@ -35,18 +36,12 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/create-github-app-token@v3
-        id: token
-        with:
-          app-id: ${{ secrets.RELEASE_APP_ID }}
-          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
-
       - uses: actions/checkout@v7
         with:
           # `fetch-depth: 0` porque o corte compara com as tags, e o checkout
           # raso padrão não traz nenhuma.
           fetch-depth: 0
-          token: ${{ steps.token.outputs.token }}
+          token: ${{ secrets.RELEASE_APP_TOKEN }}
 
       - uses: ./.github/actions/preparar-node
         # O teto do preâmbulo mora aqui porque passo de composite action não
@@ -63,12 +58,12 @@ jobs:
 
       - name: Abrir o PR
         env:
-          GH_TOKEN: ${{ steps.token.outputs.token }}
+          GH_TOKEN: ${{ secrets.RELEASE_APP_TOKEN }}
           VERSAO: ${{ steps.corte.outputs.versao }}
         run: |
           set -euo pipefail
           git config user.name  'deskcomm-release[bot]'
-          git config user.email '${{ steps.token.outputs.app-slug }}[bot]@users.noreply.github.com'
+          git config user.email 'deskcomm-release@users.noreply.github.com'
           git checkout -b "release/${VERSAO}"
           git add CHANGELOG.md .changes
           git commit -m "release(${VERSAO}): a versão montada a partir dos fragmentos declarados"
@@ -92,16 +87,10 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/create-github-app-token@v3
-        id: token
-        with:
-          app-id: ${{ secrets.RELEASE_APP_ID }}
-          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
-
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-          token: ${{ steps.token.outputs.token }}
+          token: ${{ secrets.RELEASE_APP_TOKEN }}
 
       - uses: ./.github/actions/preparar-node
         # O teto do preâmbulo mora aqui porque passo de composite action não
@@ -243,7 +232,7 @@ jobs:
         run: |
           set -euo pipefail
           git config user.name  'deskcomm-release[bot]'
-          git config user.email '${{ steps.token.outputs.app-slug }}[bot]@users.noreply.github.com'
+          git config user.email 'deskcomm-release@users.noreply.github.com'
           # Tag ANOTADA: guarda autor e data, e é o que `git describe
           # --exact-match` do agent.sh espera encontrar na VPS.
           git tag -a "v${VERSAO}" -m "v${VERSAO}"
@@ -262,7 +251,7 @@ jobs:
       - name: Publicar a release no GitHub
         if: steps.pendente.outputs.cortar == 'sim'
         env:
-          GH_TOKEN: ${{ steps.token.outputs.token }}
+          GH_TOKEN: ${{ secrets.RELEASE_APP_TOKEN }}
           VERSAO: ${{ steps.pendente.outputs.versao }}
         run: |
           set -euo pipefail
