@@ -1,13 +1,16 @@
 "use client";
+import { useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Button } from "@/components/ui/button";
 
 import { CanalOficialClient } from "./CanalOficialClient";
 import { CanalParceiroClient } from "./CanalParceiroClient";
 import { ConnectionsClient } from "./ConnectionsClient";
 import { TemplatesClient } from "./TemplatesClient";
 import { TemplatesParceiroClient } from "./TemplatesParceiroClient";
+import { ApagarHistoricoDialog } from "./ApagarHistoricoDialog";
 import { useT } from "@/hooks/i18n/useT";
 
 /**
@@ -37,6 +40,7 @@ export function ConexoesShell({ wahaConfigured }: { wahaConfigured: boolean }) {
   const t = useT();
   const router = useRouter();
   const params = useSearchParams();
+  const [apagarHistoricoOpen, setApagarHistoricoOpen] = useState(false);
   const abaParam = params.get("aba");
   const aba = abaParam === "oficial" ? "oficial" : abaParam === "parceiro" ? "parceiro" : "numeros";
   const sub = params.get("sub") === "templates" ? "templates" : "conexao";
@@ -52,6 +56,7 @@ export function ConexoesShell({ wahaConfigured }: { wahaConfigured: boolean }) {
   };
 
   return (
+    <div className="flex flex-col gap-6">
     <Tabs value={aba} onValueChange={(v) => irPara(v, sub)} className="flex flex-col gap-4">
       <TabsList>
         {/* Rótulos pelo que o usuário RECONHECE, não pelo nome técnico do motor por
@@ -118,5 +123,25 @@ export function ConexoesShell({ wahaConfigured }: { wahaConfigured: boolean }) {
         </Tabs>
       </TabsContent>
     </Tabs>
+
+      {/* Zona de perigo: afeta a ORGANIZAÇÃO inteira, não um canal específico
+          — por isso fica fora das abas, sempre visível. Ver ApagarHistoricoDialog. */}
+      <div className="rounded-lg border border-error-fg/30 p-4">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <p className="text-sm font-medium">{t("Zona de perigo")}</p>
+            <p className="text-sm text-muted-foreground">
+              {t(
+                "Apaga o histórico de conversas de todos os contatos desta organização — use quando o número conectado não corresponde a esta conta.",
+              )}
+            </p>
+          </div>
+          <Button variant="destructive" onClick={() => setApagarHistoricoOpen(true)}>
+            {t("Apagar histórico de conversas")}
+          </Button>
+        </div>
+      </div>
+      <ApagarHistoricoDialog open={apagarHistoricoOpen} onOpenChange={setApagarHistoricoOpen} />
+    </div>
   );
 }

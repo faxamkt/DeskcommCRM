@@ -16,7 +16,10 @@ import type { LgpdRequest, LgpdRequestType, LgpdScope } from "./types";
 export interface CreateLgpdRequestInput {
   organizationId: string;
   requestType: LgpdRequestType;
-  source: "nuvemshop" | "admin_panel" | "api";
+  // Espelha a check constraint real do banco (lgpd_requests_source_check):
+  // nuvemshop|manual|api|support. "admin_panel" nunca existiu ali — passar
+  // esse valor derruba o INSERT em runtime; o tipo só não acusava.
+  source: "nuvemshop" | "manual" | "api" | "support";
   contactId?: string | null;
   externalCustomerId?: string | null;
   receivedAt: Date;
