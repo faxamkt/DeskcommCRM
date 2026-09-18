@@ -5327,6 +5327,29 @@ export const DICIONARIO: Traducoes = {
   "Confirmação": { es: "Confirmación" },
   "Anonimizando…": { es: "Anonimizando…" },
   "Anonimizar permanentemente": { es: "Anonimizar permanentemente" },
+  "Nenhum contato pra redigir — esta organização já está limpa.": {
+    es: "Ningún contacto para redactar — esta organización ya está limpia.",
+  },
+  "Todos os contatos já tinham solicitação de redação em andamento.": {
+    es: "Todos los contactos ya tenían una solicitud de redacción en curso.",
+  },
+  "{n} contato(s) marcado(s) para redação. O conteúdo some em segundos.": {
+    es: "{n} contacto(s) marcado(s) para redacción. El contenido desaparece en segundos.",
+  },
+  "Apagar histórico de conversas desta organização (LGPD)": {
+    es: "Borrar historial de conversaciones de esta organización (LGPD)",
+  },
+  "Ação irreversível. Redige TODO contato não-anonimizado desta organização: mensagens viram \"[mensagem anonimizada]\", mídia é apagada do Storage, e o cadastro vira \"Cliente Anonimizado #N\". A organização em si continua ativa — pipeline, agente e conexões não são afetados.": {
+    es: "Acción irreversible. Redacta TODO contacto no anonimizado de esta organización: los mensajes se vuelven \"[mensaje anonimizado]\", los archivos se borran del Storage, y el registro se vuelve \"Contacto Anonimizado #N\". La organización en sí sigue activa — pipeline, agente y conexiones no se ven afectados.",
+  },
+  "Ex.: número anterior errado, histórico não pertence a esta conta": {
+    es: "Ej.: número anterior incorrecto, el historial no pertenece a esta cuenta",
+  },
+  "Apagar histórico permanentemente": { es: "Borrar historial permanentemente" },
+  "Apaga o histórico de conversas de todos os contatos desta organização — use quando o número conectado não corresponde a esta conta.": {
+    es: "Borra el historial de conversaciones de todos los contactos de esta organización — úsalo cuando el número conectado no corresponde a esta cuenta.",
+  },
+  "Apagar histórico de conversas": { es: "Borrar historial de conversaciones" },
   "Abrir conversa com": { es: "Abrir conversación con" },
   "no Inbox": { es: "en el Inbox" },
   "sem ler": { es: "sin leer" },
