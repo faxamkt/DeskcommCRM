@@ -29,7 +29,18 @@ import { env } from "@/lib/env";
 import { logger } from "@/lib/logger";
 import { collectExportData } from "@/lib/lgpd/export-collector";
 import { findLgpdRequest } from "@/lib/lgpd/repository";
-import { renderLgpdPdf } from "@/lib/lgpd/pdf-renderer";
+// Dinâmico, e não `import` estático de propósito: `@/lib/lgpd/pdf-renderer`
+// puxa @react-pdf/renderer → @react-pdf/textkit → @react-pdf/hyphenate/en-us,
+// cujo `exports` wildcard o resolvedor CJS que o `tsx` usa (via seu hook de
+// path alias) não resolve — `ERR_PACKAGE_PATH_NOT_EXPORTED`, mesmo o arquivo
+// existindo (funciona via `import()` nativo fora do tsx). Estático aqui
+// derrubava a IMPORTAÇÃO deste módulo inteiro, e como
+// `register-handlers.ts` importa todo handler no topo, isso derrubava
+// `ensureHandlersRegistered()` para os OUTROS 11 handlers também —
+// `lib/event-log/drain-loop.ts` engolia o erro e desligava o laço rápido
+// inteiro, sobrando só o cron de 1/min pra tudo. Adiado pro ponto de uso, o
+// pior caso vira esta exportação específica falhar (retry via dispatcher),
+// não o drain de TODO evento genérico.
 import { signPdfPades, isPadesConfigured } from "@/lib/lgpd/pades-signer";
 import {
   EmailNotConfigured,
@@ -151,6 +162,7 @@ export async function processLgpdExport(event: EventRow): Promise<HandlerResult>
 
     // 4. Render PDF (with warning banner when unsigned).
     const padesConfigured = isPadesConfigured();
+    const { renderLgpdPdf } = await import("@/lib/lgpd/pdf-renderer");
     const pdfBuffer = await renderLgpdPdf(data, { unsignedWarning: !padesConfigured });
 
     // 5. Sign (stubbed when key missing).
