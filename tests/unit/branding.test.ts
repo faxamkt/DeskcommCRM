@@ -227,6 +227,12 @@ const MARCA_CONGELADA: Record<string, EntradaDeMarca> = {
       "é a guarda do contrato acima: este teste é o que reprova quem renomear o header. Trocar a string aqui para 'limpar a marca' desarmaria a única proteção que o contrato tem",
     marcas: ["x-deskcomm-event", "x-deskcomm-signature", "x-deskcomm-signature"],
   },
+  "app/api/v1/tenants/provision/route.ts": {
+    categoria: "PROTOCOLO",
+    motivo:
+      "identificador técnico: nome da env var do secret compartilhado (DESKCOMM_PROVISIONING_SECRET) que autentica o provisionamento de tenant via API (integração Clinicfx). Não é UI — renomear é troca de contrato de infra, não limpeza de marca",
+    marcas: ["env.deskcomm_provisioning_secret"],
+  },
   "lib/mcp/server.ts": {
     categoria: "PROTOCOLO",
     motivo:
@@ -285,6 +291,13 @@ const MARCA_CONGELADA: Record<string, EntradaDeMarca> = {
     categoria: "INFRA",
     motivo: "o mesmo cookie de impersonação, na cópia que o middleware edge consegue importar",
     marcas: ["deskcomm-impersonate"],
+  },
+
+  "lib/env.ts": {
+    categoria: "INFRA",
+    motivo:
+      "nome da env var DESKCOMM_PROVISIONING_SECRET (schema Zod). É o par de app/api/v1/tenants/provision/route.ts — renomear troca o contrato de infra que a integração Clinicfx assina, não é texto de interface",
+    marcas: ["deskcomm_provisioning_secret"],
   },
 
   "hooks/ai/useDebugToggle.ts": {

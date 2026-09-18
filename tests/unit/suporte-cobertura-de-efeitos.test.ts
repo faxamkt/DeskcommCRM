@@ -8,6 +8,7 @@ it("todo handler mutante do app declara guarda de suporte ou é infraestrutura i
  for(const path of files("app/api/v1").filter(p=>p.endsWith("/route.ts"))){
   if(/app\/api\/v1\/(cron|webhooks|crm)\//.test(path)||path==="app/api/v1/system/agent/route.ts")continue; // segredo de máquina, sem actor/session cookie — crm/* autentica por X-Api-Key de tenant, nunca cookie de usuário
   if(path.includes("/impersonate"))continue; // início/fim autenticam a posse e têm contrato próprio
+  if(path==="app/api/v1/tenants/provision/route.ts")continue; // segredo de máquina (DESKCOMM_PROVISIONING_SECRET), sem actor/session cookie — mesma classe do cron/webhooks
   const source=ts.createSourceFile(path,readFileSync(path,"utf8"),ts.ScriptTarget.Latest,true);
   // DUAS FORMAS de exportar um handler, e o gate precisa das duas. A varredura
   // só enxergava `export async function POST`; `export const PATCH = async () => {}`
