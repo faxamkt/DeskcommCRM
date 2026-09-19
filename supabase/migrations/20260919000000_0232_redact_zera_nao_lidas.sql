@@ -1,4 +1,4 @@
--- 0231_redact_zera_nao_lidas
+-- 0232_redact_zera_nao_lidas
 -- Forward-fix de fn_lgpd_cascade_redact_contact (0019, evoluída por 0071 e
 -- refletida na baseline). O passo 2 zerava metadata/last_message_preview da
 -- conversa mas não unread_count_for_assignee — sobrava badge de "não lida"
