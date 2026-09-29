@@ -26,6 +26,8 @@
  * alternativa (status por seção) triplicaria os estados no componente, e a
  * doença que esta rota cura é exatamente estados distintos colapsados num só.
  */
+import { createAdminClient } from "@/lib/supabase/admin";
+import { prospectEnrichmentSchema } from "@/lib/prospecting/schema";
 import { randomUUID } from "node:crypto";
 import { type NextRequest } from "next/server";
 
@@ -36,9 +38,16 @@ import { nomesDosAtendentes } from "@/lib/users/nome-do-atendente";
 
 export const dynamic = "force-dynamic";
 
-/** Sem o embed do funil o painel não consegue montar os campos customizados. */
+/**
+ * Sem o embed do funil o painel não consegue montar os campos customizados.
+ * Nome do funil e da etapa entram porque dois leads de mesmo título em funis
+ * diferentes ficavam idênticos na lista (#943). `!inner` para filtrar funil
+ * arquivado no banco, antes do `limit(3)` — `pipeline_id` é NOT NULL.
+ */
+// `stage_id` e as `etapas` do funil alimentam o seletor de etapa do painel: mover
+// o negócio (ex.: "Pedido confirmado") direto da conversa, sem ir ao quadro.
 const LEAD_COLS =
-  "id, title, status, value_cents, currency, updated_at, pipeline_id, custom_fields, crm_pipelines(settings)";
+  "id, title, status, value_cents, currency, updated_at, pipeline_id, stage_id, custom_fields, crm_pipelines!inner(name, settings, is_archived, etapas:crm_stages!crm_stages_pipeline_id_fkey(id, name, position, is_won, is_lost, is_archived)), crm_stages!crm_leads_stage_id_fkey(name)";
 const ORDER_COLS = "id, external_id, status, total_cents, currency, created_at";
 /** Acompanha o que a timeline mostra — `reason` e `actor_kind` inclusive. */
 /**
@@ -82,14 +91,35 @@ export async function GET(
   }
 
   const { data: contactScope, error: scopeError } = await supabase.from("contacts")
-    .select("organization_id").eq("id", contactId).maybeSingle();
+    .select("organization_id, is_anonymized").eq("id", contactId).maybeSingle();
   if (scopeError) return fail("internal_error", scopeError.message, 500, { requestId });
   if (!contactScope) return fail("not_found", "Contato não encontrado.", 404, { requestId });
+  // Candidates are worker-only. Authorize the contact through RLS first, then
+  // scope this read to that exact contact and organization. Never expose raw data.
+  const enrichment = await (async () => {
+    if (contactScope.is_anonymized) return { enrichment: null, enrichment_error: false };
+    try {
+      const result = await createAdminClient().from("prospecting_candidates")
+        .select("data, created_at")
+        .eq("organization_id", contactScope.organization_id).eq("contact_id", contactId)
+        .order("created_at", { ascending: false }).limit(1).maybeSingle();
+      if (result.error) return { enrichment: null, enrichment_error: true };
+      if (!result.data) return { enrichment: null, enrichment_error: false };
+      const parsed = prospectEnrichmentSchema.safeParse(result.data.data);
+      return parsed.success
+        ? { enrichment: { ...parsed.data, collected_at: result.data.created_at }, enrichment_error: false }
+        : { enrichment: null, enrichment_error: true };
+    } catch {
+      return { enrichment: null, enrichment_error: true };
+    }
+  })();
   const [leads, orders, activities, demandas, fatos, historico] = await Promise.all([
     supabase
       .from("crm_leads")
       .select(LEAD_COLS)
       .eq("contact_id", contactId).eq("organization_id", contactScope.organization_id)
+      // Arquivar o funil não fecha os leads; sem isto eles seguiam aqui como abertos.
+      .eq("crm_pipelines.is_archived", false)
       .order("updated_at", { ascending: false })
       .limit(3),
     supabase
@@ -142,6 +172,7 @@ export async function GET(
 
   return ok(
     {
+      ...enrichment,
       leads: (leads.data ?? []).map((row) => comCamposDoFunil(row as Record<string, unknown>)),
       orders: orders.data ?? [],
       activities: linhas.map((a) => ({
@@ -158,9 +189,29 @@ export async function GET(
 }
 
 function comCamposDoFunil(row: Record<string, unknown>) {
-  const { crm_pipelines, ...lead } = row;
+  const { crm_pipelines, crm_stages, ...lead } = row;
   return {
     ...lead,
     field_defs: camposDoFunil(settingsDoEmbed(crm_pipelines)),
+    funil_nome: nomeDoEmbed(crm_pipelines),
+    etapa_nome: nomeDoEmbed(crm_stages),
+    etapas_do_funil: etapasDoEmbed(crm_pipelines),
   };
+}
+
+/** As etapas ATIVAS do funil do negócio, na ordem do quadro. */
+function etapasDoEmbed(embed: unknown): Array<{ id: string; name: string; is_won: boolean; is_lost: boolean }> {
+  const alvo = Array.isArray(embed) ? embed[0] : embed;
+  const etapas = (alvo as { etapas?: unknown } | null)?.etapas;
+  if (!Array.isArray(etapas)) return [];
+  return (etapas as Array<{ id: string; name: string; position: number | string; is_won: boolean; is_lost: boolean; is_archived: boolean }>)
+    .filter((e) => !e.is_archived)
+    .sort((a, b) => Number(a.position) - Number(b.position))
+    .map((e) => ({ id: e.id, name: e.name, is_won: e.is_won, is_lost: e.is_lost }));
+}
+
+function nomeDoEmbed(embed: unknown): string | null {
+  const alvo = Array.isArray(embed) ? embed[0] : embed;
+  const nome = (alvo as { name?: unknown } | null)?.name;
+  return typeof nome === "string" ? nome : null;
 }

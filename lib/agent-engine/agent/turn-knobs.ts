@@ -1,5 +1,9 @@
 import type { Env } from '../env';
 import type { InboundTurnKnobs } from './inbound-turn';
+import {
+  modoDeDivulgacaoDaInstalacao,
+  promessaSemanticaDaInstalacao,
+} from '../../instalacao/comportamento';
 /** Shared env projection for worker and in-process preview. */
 export function turnKnobsFromEnv(env: Env): InboundTurnKnobs {
   return {
@@ -31,7 +35,7 @@ export function turnKnobsFromEnv(env: Env): InboundTurnKnobs {
       windowTurns: env.PRUNE_TOOL_RESULTS_WINDOW_TURNS,
       minResultTokens: env.PRUNE_TOOL_RESULTS_MIN_RESULT_TOKENS,
     },
-    goldenCandidatesDir: env.GOLDEN_CANDIDATES_DIR,
+    goldenCandidates: env.GOLDEN_CANDIDATES_ENABLED,
     stageClassifier: {
       ...(env.STAGE_CLASSIFIER_MODEL !== undefined ? { model: env.STAGE_CLASSIFIER_MODEL } : {}),
     },
@@ -40,9 +44,18 @@ export function turnKnobsFromEnv(env: Env): InboundTurnKnobs {
         ? { model: env.JAILBREAK_CLASSIFIER_MODEL }
         : {}),
     },
-    disclosureMode: env.DISCLOSURE_MODE,
+    // As duas chaves da INSTALAÇÃO (issue #1034) são lidas a CADA ACESSO, e não
+    // uma vez só: este objeto é montado no boot do worker e consumido a cada
+    // turno, então um snapshot aqui faria a tela de admin mentir até o próximo
+    // restart. Sem leitura do banco no processo, o valor é o do `.env` — o que
+    // faz este caminho ser, byte a byte, o de antes da #1034.
+    get disclosureMode() {
+      return modoDeDivulgacaoDaInstalacao(env.DISCLOSURE_MODE);
+    },
     promiseSemantic: {
-      enabled: env.PROMISE_SEMANTIC_ENABLED,
+      get enabled() {
+        return promessaSemanticaDaInstalacao(env.PROMISE_SEMANTIC_ENABLED);
+      },
       ...(env.PROMISE_SEMANTIC_MODEL !== undefined ? { model: env.PROMISE_SEMANTIC_MODEL } : {}),
     },
     followupAi: {

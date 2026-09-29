@@ -4,6 +4,7 @@ import {
   BACKOFF_MS,
   actionTurnCompleted,
   occupancyEventCount,
+  pisoDoInboundDaEspera,
   processNode,
   resolveWaitPhase,
   selectEdge,
@@ -142,6 +143,34 @@ describe("occupancyEventCount", () => {
   });
 });
 
+describe("pisoDoInboundDaEspera", () => {
+  const no = {
+    id: "mr1",
+    type: "match_reply" as const,
+    label: "Casar",
+    position: { x: 0, y: 0 },
+    config: {
+      branches: [{ id: "br_sim", label: "1", op: "eq" as const, pattern: "1" }],
+      grace_timeout_ms: 7_200_000,
+    },
+  };
+  const park = "2026-09-20T17:02:31.053Z";
+  const wait = {
+    node_id: "mr1",
+    idempotency_key: "mr1:3",
+    event_type: "wait_started",
+    payload: { wake_status: "waiting_reply", next_eval_at: "2026-09-20T19:02:31.053Z" },
+  };
+
+  it("volta ao instante em que a espera começou, não ao updated_at do wake", () => {
+    expect(pisoDoInboundDaEspera(no, [wait], "2026-09-20T19:18:00.000Z")).toBe(park);
+  });
+
+  it("sem wait_started, usa o fallback", () => {
+    expect(pisoDoInboundDaEspera(no, [], "2026-09-20T19:18:00.000Z")).toBe("2026-09-20T19:18:00.000Z");
+  });
+});
+
 describe("actionTurnCompleted", () => {
   it("is true when action_sent sits in the current occupancy suffix", () => {
     const events = [
@@ -198,6 +227,50 @@ describe("processNode — action after send closed", () => {
       actionRecheckCount: 1,
     });
     expect(result.kind).toBe("recheck");
+  });
+});
+
+describe("processNode — collect/skill (passagem no relógio)", () => {
+  // Os dois nós são do fluxo de ATENDIMENTO: quem coleta e quem ativa a skill é
+  // o executor in-turn. Aqui, no motor de relógio, eles apenas seguem pela
+  // aresta única — o teste fixa esse contrato para o dia em que alguém tentar
+  // dar semântica de coleta ao tick.
+  it("collect avança pela aresta única", () => {
+    const node: FlowNode = {
+      id: "c1",
+      type: "collect",
+      label: "Cidade",
+      position: { x: 0, y: 0 },
+      config: { key: "cidade", label: "Cidade", type: "text", required: true, permite_correcao: true },
+    };
+    const edges = [edge({ source: "c1", target: "n2", condition: { type: "always" } })];
+    const r = processNode({ node, edges, enrollment: enrollment(), lead: lead(), clock });
+    expect(r).toMatchObject({ kind: "advance", next_node_id: "n2" });
+  });
+
+  it("skill avança pela aresta única", () => {
+    const node: FlowNode = {
+      id: "s1",
+      type: "skill",
+      label: "Catálogo",
+      position: { x: 0, y: 0 },
+      config: { skill_name: "catalogo-apresentacao" },
+    };
+    const edges = [edge({ source: "s1", target: "n2", condition: { type: "always" } })];
+    const r = processNode({ node, edges, enrollment: enrollment(), lead: lead(), clock });
+    expect(r).toMatchObject({ kind: "advance", next_node_id: "n2" });
+  });
+
+  it("collect sem aresta de saída falha com motivo claro", () => {
+    const node: FlowNode = {
+      id: "c1",
+      type: "collect",
+      label: "Cidade",
+      position: { x: 0, y: 0 },
+      config: { key: "cidade", label: "Cidade", type: "text", required: true, permite_correcao: true },
+    };
+    const r = processNode({ node, edges: [], enrollment: enrollment(), lead: lead(), clock });
+    expect(r).toMatchObject({ kind: "fail" });
   });
 });
 
@@ -452,6 +525,40 @@ describe("processNode — condition", () => {
       lead: lead({ lead_stage: "hot", steps_taken: 1 }),
       clock,
     });
+    expect(result).toMatchObject({ kind: "advance", next_node_id: "yes" });
+  });
+
+  // O formulário gravou por meses o que se DIGITAVA — texto — num campo que o
+  // motor só compara como número. `gte "3"` nunca era verdadeiro e `neq "3"`
+  // sempre era: a regra aparecia pronta no card e decidia sozinha. Passos é
+  // número por natureza; o motor lê o número que a pessoa escreveu.
+  it.each([
+    ["gte", "3", 3, "yes"],
+    ["gte", " 4 ", 3, "no"],
+    ["lte", "2", 3, "no"],
+    ["eq", "3", 3, "yes"],
+    ["neq", "3", 3, "no"],
+  ] as const)("steps_taken %s %j (texto salvo pela tela) compara como número", (op, valor, passos, esperado) => {
+    const node = conditionNode({ combinator: "and", checks: [{ field: "steps_taken", op, value: valor }] });
+    const result = processNode({ node, edges, enrollment: enrollment(), lead: lead({ steps_taken: passos }), clock });
+    expect(result).toMatchObject({ kind: "advance", next_node_id: esperado });
+  });
+
+  it("passos com fração (escrita por API) compara como número, como sempre comparou", () => {
+    const node = conditionNode({ combinator: "and", checks: [{ field: "steps_taken", op: "lte", value: "2.5" }] });
+    const result = processNode({ node, edges, enrollment: enrollment(), lead: lead({ steps_taken: 2 }), clock });
+    expect(result).toMatchObject({ kind: "advance", next_node_id: "yes" });
+  });
+
+  it("steps_taken com texto que não é número continua nunca satisfazendo maior/menor", () => {
+    const node = conditionNode({ combinator: "and", checks: [{ field: "steps_taken", op: "gte", value: "três" }] });
+    const result = processNode({ node, edges, enrollment: enrollment(), lead: lead({ steps_taken: 9 }), clock });
+    expect(result).toMatchObject({ kind: "advance", next_node_id: "no" });
+  });
+
+  it("a leitura como número é só de passos: etapa continua comparada ao pé da letra", () => {
+    const node = conditionNode({ combinator: "and", checks: [{ field: "lead_stage", op: "eq", value: "3" }] });
+    const result = processNode({ node, edges, enrollment: enrollment(), lead: lead({ lead_stage: "3" }), clock });
     expect(result).toMatchObject({ kind: "advance", next_node_id: "yes" });
   });
 
@@ -864,6 +971,21 @@ describe("processNode — match_reply", () => {
       lastInboundBody: "talvez depois",
     });
     expect(result).toMatchObject({ kind: "advance", next_node_id: "escape" });
+  });
+
+  it("wokeEarly sem texto desta pergunta permanece na espera — não ALWAYS", () => {
+    const result = processNode({
+      node: matchNode(),
+      edges,
+      enrollment: enrollment(),
+      lead: lead(),
+      clock,
+      waitElapsed: false,
+      wokeEarly: true,
+      lastInboundBody: "",
+    });
+    expect(result.kind).toBe("wait");
+    expect(result).toMatchObject({ wake_status: "waiting_reply" });
   });
 
   it("wokeEarly + save_to sem aresta Sempre usa o primeiro ramo que não é no_reply", () => {

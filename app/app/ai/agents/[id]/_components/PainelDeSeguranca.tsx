@@ -51,6 +51,7 @@ import {
   CONFERENCIA_DE_ENTRADA,
   type ConferenciaDeSaida,
 } from "@/lib/ai/guardrails/lista-de-conferencia";
+import { AjustesDeEstilo } from "./AjustesDeEstilo";
 
 function Conferencia({
   c,
@@ -65,7 +66,8 @@ function Conferencia({
   estado: CamadaDeSeguranca | undefined;
   podeEditar: boolean;
   salvando: boolean;
-  onToggle: (layer: string, v: boolean) => void;
+  /** Só o valor: QUAL camada gravar é decisão de quem monta o item, não do item. */
+  onToggle: (v: boolean) => void;
 }) {
   const t = useT();
   // Prefixo próprio para o ITEM: os controles dentro dele têm testid começando em
@@ -95,7 +97,7 @@ function Conferencia({
                 data-testid={`conferencia-${c.nome}-liga`}
                 checked={estado?.efetivo ?? false}
                 disabled={!podeEditar || salvando}
-                onCheckedChange={(v) => onToggle(c.nome, v)}
+                onCheckedChange={(v) => onToggle(v)}
                 aria-label={t(c.rotulo)}
               />
               <span className="text-xs text-muted-foreground">
@@ -130,16 +132,25 @@ export function PainelDeSeguranca() {
 
   const porNome = new Map((camadas.data?.camadas ?? []).map((c) => [c.layer as string, c]));
   const podeEditar = camadas.data?.podeEditar ?? false;
-  const props = (camada: string | null) => ({
+  // `camada` — a chave de `org_guardrail_layers` — e NÃO `nome`, que é o
+  // identificador de tela. O interruptor mandava `c.nome` ("jailbreak_detect"),
+  // a rota valida contra o enum de camadas ("jailbreak"), e ligar qualquer uma
+  // das duas devolvia 422 em toda instalação. O `as` de antes escondia isso do
+  // typecheck; sem ele, trocar de campo vira erro de compilação.
+  const props = (camada: ConferenciaDeSaida["camada"]) => ({
     estado: camada === null ? undefined : porNome.get(camada),
     podeEditar,
     salvando: gravar.isPending,
-    onToggle: (layer: string, v: boolean) =>
-      gravar.mutate({ layer: layer as CamadaDeSeguranca["layer"], enabled: v }),
+    onToggle: (v: boolean) => {
+      if (camada !== null) gravar.mutate({ layer: camada, enabled: v });
+    },
   });
 
   return (
     <div className="space-y-4" data-testid="painel-de-seguranca">
+      {/* A normalização acontece antes da cadeia abaixo; a ordem visual espelha o runtime. */}
+      <AjustesDeEstilo />
+
       <Card className="space-y-2 p-4">
         <h3 className="text-sm font-medium">{t("Antes de cada mensagem sair")}</h3>
         <p className="text-xs text-muted-foreground">

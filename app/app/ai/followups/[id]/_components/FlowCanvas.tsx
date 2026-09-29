@@ -6,6 +6,7 @@ import {
   ReactFlowProvider,
   Background,
   Controls,
+  ConnectionLineType,
   addEdge,
   useNodesState,
   useEdgesState,
@@ -17,6 +18,8 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 
+import { estimateNodeSize, layoutFlowGraph, LAYOUT_NODE_WIDTH } from "@/lib/followup/auto-layout";
+import { semAresta, semArestasDoNo, semNo } from "@/lib/followup/excluir-do-grafo";
 import {
   toReactFlow,
   fromReactFlow,
@@ -27,6 +30,7 @@ import {
   type RFNodeData,
 } from "@/lib/followup/graph-mappers";
 import { conditionLabel } from "@/lib/followup/edge-condition-options";
+import { nextSequenceId } from "@/lib/followup/next-sequence-id";
 import {
   branchIdForCondition,
   conditionForBranch,
@@ -43,9 +47,10 @@ import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 import { Plus, X } from "@/lib/ui/icons";
 import { NodeConfigPanel } from "./NodeConfigPanel";
 import { EdgeConfigPanel } from "./EdgeConfigPanel";
+import { EtapasDoFluxoProvider, useEtapasDoFluxo } from "./EtapasDoFluxo";
 import { NodePalette } from "./NodePalette";
 import { PublishBar } from "./PublishBar";
-import { NODE_VISUALS } from "./nodes/nodeVisuals";
+import { NODE_VISUALS, configPadraoDaAcao } from "./nodes/nodeVisuals";
 import { TriggerNode } from "./nodes/TriggerNode";
 import { WaitNode } from "./nodes/WaitNode";
 import { ConditionNode } from "./nodes/ConditionNode";
@@ -54,6 +59,9 @@ import { MatchReplyNode } from "./nodes/MatchReplyNode";
 import { RepeatNode } from "./nodes/RepeatNode";
 import { ActionNode } from "./nodes/ActionNode";
 import { EndNode } from "./nodes/EndNode";
+import { CollectNode } from "./nodes/CollectNode";
+import { InternalTaskNode } from "./nodes/InternalTaskNode";
+import { SkillNode } from "./nodes/SkillNode";
 
 const EMPTY_GRAPH: FlowGraph = { nodes: [], edges: [] };
 const DND_MIME = "application/x-followup-node-type";
@@ -68,7 +76,14 @@ const nodeTypes: NodeTypes = {
   match_reply: MatchReplyNode,
   repeat: RepeatNode,
   action: ActionNode,
+  // `internal_task` estava na paleta, no schema, no publish e no motor — e não
+  // aqui (#1540): o React Flow caía no fallback da caixa desconhecida, sem
+  // rótulo e sem formulário. Completar o nó é esta linha mais o formulário do
+  // painel (`forms/InternalTaskForm`).
+  internal_task: InternalTaskNode,
   end: EndNode,
+  collect: CollectNode,
+  skill: SkillNode,
 };
 
 interface Props {
@@ -78,6 +93,7 @@ interface Props {
 
 function FlowCanvasInner({ flowId, initialData }: Props) {
   const t = useT();
+  const { nomes } = useEtapasDoFluxo();
   const { data: flow } = useFollowupFlow(flowId, { initialData });
   // `initial` seeds React Flow state ONCE on mount — it must NOT react to
   // `flow` changing on every refetch (that would clobber in-progress edits).
@@ -89,14 +105,25 @@ function FlowCanvasInner({ flowId, initialData }: Props) {
   const [nodes, setNodes, onNodesChange] = useNodesState<RFNode>(initial.nodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState<RFEdge>(initial.edges);
   const [savedGraph, setSavedGraph] = useState<FlowGraph>(initialData.draft_graph ?? EMPTY_GRAPH);
-  const nextId = useRef(1);
-  const nextEdgeId = useRef(1);
-  const { screenToFlowPosition } = useReactFlow();
+  // As configurações do GRAFO (palavras-gatilho, teto de tentativas, prazo do
+  // roteiro) não vivem em nó nenhum: sem este estado, salvar o rascunho as
+  // apagava — `fromReactFlow` só conhece nós e arestas.
+  const [settings, setSettings] = useState<FlowGraph["settings"]>(initialData.draft_graph?.settings);
+  const surface = initialData.surface ?? "followup";
+  // Continue after the largest persisted suffix. Starting again at 1 makes a
+  // newly-created node/edge reuse an existing React Flow key and visually
+  // replace a connection in older drafts.
+  const nextId = useRef(nextSequenceId(initial.nodes.map((node) => node.id)));
+  const nextEdgeId = useRef(nextSequenceId(initial.edges.map((edge) => edge.id)));
+  const { screenToFlowPosition, fitView } = useReactFlow();
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
 
-  const liveGraph = useMemo(() => fromReactFlow(nodes, edges), [nodes, edges]);
+  const liveGraph = useMemo(() => {
+    const base = fromReactFlow(nodes, edges);
+    return settings ? { ...base, settings } : base;
+  }, [nodes, edges, settings]);
   const dirty = useMemo(() => !graphsEqual(liveGraph, savedGraph), [liveGraph, savedGraph]);
 
   const markNodeErrors = useCallback(
@@ -160,11 +187,12 @@ function FlowCanvasInner({ flowId, initialData }: Props) {
           : undefined;
         return {
           ...e,
-          label: branch ? t(rotuloDoRamo(branch)) : t(conditionLabel(condition)),
+          type: "smoothstep" as const,
+          label: branch ? t(rotuloDoRamo(branch, nomes)) : t(conditionLabel(condition)),
           selected: e.id === selectedEdgeId,
         };
       }),
-    [edges, nodes, selectedEdgeId, t],
+    [edges, nodes, selectedEdgeId, t, nomes],
   );
 
   // Quais saídas do nó selecionado já têm aresta. Quem sabe isso é o canvas —
@@ -203,19 +231,25 @@ function FlowCanvasInner({ flowId, initialData }: Props) {
     [setEdges, nodes],
   );
 
+  // O nó de ação nasce com o padrão do gatilho do fluxo. O callback depende só
+  // do `kind` (string), não do objeto `trigger_config`, que é novo a cada refetch.
+  const triggerKindRaw = flow?.trigger_config?.kind;
+  const triggerKind = typeof triggerKindRaw === "string" ? triggerKindRaw : undefined;
+
   const addNodeAt = useCallback(
     (type: NodeType, position: { x: number; y: number }) => {
       const visual = NODE_VISUALS[type];
       const id = `${type}-${nextId.current++}`;
+      const config = type === "action" ? configPadraoDaAcao(triggerKind) : visual.defaultConfig();
       const newNode: RFNode = {
         id,
         type,
         position,
-        data: { label: t(visual.defaultLabel), config: visual.defaultConfig() },
+        data: { label: t(visual.defaultLabel), config },
       };
       setNodes((nds) => nds.concat(newNode));
     },
-    [setNodes, t],
+    [setNodes, t, triggerKind],
   );
 
   const onPaletteAdd = useCallback(
@@ -225,6 +259,50 @@ function FlowCanvasInner({ flowId, initialData }: Props) {
     },
     [nodes.length, addNodeAt],
   );
+
+  const deleteNode = useCallback(
+    (id: string) => {
+      setNodes((nds) => semNo(nds, id));
+      setEdges((eds) => semArestasDoNo(eds, id));
+      setSelectedNodeId((cur) => (cur === id ? null : cur));
+    },
+    [setNodes, setEdges],
+  );
+
+  const deleteEdge = useCallback(
+    (id: string) => {
+      setEdges((eds) => semAresta(eds, id));
+      setSelectedEdgeId((cur) => (cur === id ? null : cur));
+    },
+    [setEdges],
+  );
+
+  const onDeleteSelection = useCallback(() => {
+    if (selectedNodeId) deleteNode(selectedNodeId);
+    else if (selectedEdgeId) deleteEdge(selectedEdgeId);
+  }, [selectedNodeId, selectedEdgeId, deleteNode, deleteEdge]);
+
+  const onAutoFit = useCallback(() => {
+    if (nodes.length === 0) return;
+    const sizes = new Map<string, { width: number; height: number }>();
+    for (const n of nodes) {
+      sizes.set(n.id, {
+        width: n.measured?.width ?? LAYOUT_NODE_WIDTH,
+        height: n.measured?.height ?? estimateNodeSize(toFlowNode(n)).height,
+      });
+    }
+    const laid = layoutFlowGraph(liveGraph, sizes, nomes);
+    const pos = new Map(laid.nodes.map((n) => [n.id, n.position]));
+    setNodes((nds) =>
+      nds.map((n) => {
+        const p = pos.get(n.id);
+        return p ? { ...n, position: p } : n;
+      }),
+    );
+    window.setTimeout(() => {
+      void fitView({ padding: 0.2, duration: 200 });
+    }, 0);
+  }, [nodes, liveGraph, setNodes, fitView]);
 
   const onDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -250,13 +328,17 @@ function FlowCanvasInner({ flowId, initialData }: Props) {
           flow={flow}
           graph={liveGraph}
           dirty={dirty}
+          selection={selectedNode ? "node" : selectedEdge ? "edge" : null}
+          onDeleteSelection={onDeleteSelection}
           onSaved={setSavedGraph}
           onPublishErrors={markNodeErrors}
           onPublishSuccess={clearNodeErrors}
+          onAutoFit={onAutoFit}
+          canAutoFit={nodes.length > 0}
         />
       )}
       <div className="flex flex-1 overflow-hidden">
-        <NodePalette onAdd={onPaletteAdd} />
+        <NodePalette onAdd={onPaletteAdd} surface={surface} />
         {/* Abaixo de `lg` a paleta fixa de 224px não cabe do lado do canvas —
             vira um drawer, disparado por este botão flutuante. */}
         <Sheet open={paletteOpen} onOpenChange={setPaletteOpen}>
@@ -264,6 +346,7 @@ function FlowCanvasInner({ flowId, initialData }: Props) {
             <SheetTitle className="sr-only">{t("Adicionar nó")}</SheetTitle>
             <NodePalette
               variant="mobile"
+              surface={surface}
               onAdd={(type) => {
                 onPaletteAdd(type);
                 setPaletteOpen(false);
@@ -283,7 +366,15 @@ function FlowCanvasInner({ flowId, initialData }: Props) {
             onNodeClick={onNodeClick}
             onEdgeClick={onEdgeClick}
             onPaneClick={onPaneClick}
-            fitView
+            defaultEdgeOptions={{ type: "smoothstep" }}
+            connectionLineType={ConnectionLineType.SmoothStep}
+            // Enquadrar só o que já existia ao abrir. Num fluxo vazio o XYFlow
+            // guarda o enquadramento para quando o PRIMEIRO nó for medido — e
+            // enquadrar um nó só é ampliá-lo ao zoom máximo (2x): quem acabou de
+            // criar o fluxo clica em "Gatilho" e a tela salta para 200%, com os
+            // nós seguintes nascendo fora da vista (medido no trace do e2e
+            // followup-cartoes: scale 1 → 2 logo após o primeiro clique).
+            fitView={initial.nodes.length > 0}
           >
             <Background />
             <Controls />
@@ -332,7 +423,12 @@ function FlowCanvasInner({ flowId, initialData }: Props) {
                 key={selectedNode.id}
                 node={selectedNode}
                 onChange={(patch) => updateNodeData(selectedNode.id, patch)}
+                onDelete={() => deleteNode(selectedNode.id)}
                 ramosLigados={ramosLigadosDoSelecionado}
+                surface={surface}
+                flowId={flowId}
+                settings={settings}
+                onSettingsChange={setSettings}
               />
             </div>
           </aside>
@@ -361,6 +457,7 @@ function FlowCanvasInner({ flowId, initialData }: Props) {
                 targetNode={selectedEdgeTarget ? toFlowNode(selectedEdgeTarget) : undefined}
                 condition={selectedEdge.data?.condition ?? { type: "always" }}
                 onChange={(condition) => updateEdgeCondition(selectedEdge.id, condition)}
+                onDelete={() => deleteEdge(selectedEdge.id)}
               />
             </div>
           </aside>
@@ -373,7 +470,9 @@ function FlowCanvasInner({ flowId, initialData }: Props) {
 export function FlowCanvas(props: Props) {
   return (
     <ReactFlowProvider>
-      <FlowCanvasInner {...props} />
+      <EtapasDoFluxoProvider>
+        <FlowCanvasInner {...props} />
+      </EtapasDoFluxoProvider>
     </ReactFlowProvider>
   );
 }

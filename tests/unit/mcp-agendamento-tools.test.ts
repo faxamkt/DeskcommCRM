@@ -111,24 +111,47 @@ describe("crm_find_free_slots", () => {
     expect(vi.mocked(horariosLivresDaOrg).mock.calls[0]![2].eventTypeSlug).toBe("consulta-inicial");
   });
 
-  it("período invertido é RESPOSTA, não exceção", async () => {
-    // Exceção mata o turno e o assistente emudece na frente do cliente
-    // (`pesquisa/repo-mcp.md` §7.5). Limite de negócio volta como texto de ensino.
+  it("um dia civil inclui a noite em Manaus, sem pedir que o modelo calcule UTC", async () => {
+    respondeCom({
+      ...SUCESSO,
+      fusoDaRegra: "America/Manaus",
+      slots: [
+        // 21h do dia 12 em Manaus: a faixa larga o alcança, e ele é do dia
+        // ANTERIOR ao pedido. Sem o filtro pelo dia LOCAL ele vazaria para dentro
+        // de uma resposta sobre o dia 13 — a mesma troca de fuso, na outra borda.
+        { inicio: new Date("2026-09-13T01:00:00.000Z"), fim: new Date("2026-09-13T01:30:00.000Z") },
+        // 21h do dia 13 em Manaus: este foi o horário que o agente perdeu ao
+        // consultar 00:00–23:59 UTC, que termina às 19:59 no fuso da regra.
+        { inicio: new Date("2026-09-14T01:00:00.000Z"), fim: new Date("2026-09-14T01:30:00.000Z") },
+        // Já é madrugada do dia 14 local; a faixa larga pode vê-lo, mas a
+        // resposta de um pedido pelo dia 13 não pode oferecê-lo.
+        { inicio: new Date("2026-09-14T05:00:00.000Z"), fim: new Date("2026-09-14T05:30:00.000Z") },
+      ],
+    });
     const r = (await crmFindFreeSlots.handler(
-      { event_type_slug: "c", de: "2026-09-10T00:00:00Z", ate: "2026-09-01T00:00:00Z" },
+      { event_type_slug: "c", dia: "2026-09-13" },
       ctx,
-    )) as { motivo: string; mensagem: string };
-    expect(r.motivo).toBe("periodo_invalido");
-    expect(r.mensagem).toMatch(/dias_a_frente/);
+    )) as { horarios: { inicio: string }[]; total_de_horarios: number };
+    expect(r.horarios.map((h) => h.inicio)).toEqual(["2026-09-14T01:00:00.000Z"]);
+    expect(r.total_de_horarios).toBe(1);
+
+    const params = vi.mocked(horariosLivresDaOrg).mock.calls[0]![2];
+    expect(params.de.toISOString()).toBe("2026-09-12T10:00:00.000Z");
+    expect(params.ate.toISOString()).toBe("2026-09-14T14:00:00.000Z");
   });
 
-  it("período longo demais é recusado com o número, não com um 'não'", async () => {
+  it("prioriza dia específico quando dia e dias_a_frente forem informados juntos (#1436)", async () => {
+    respondeCom(SUCESSO);
     const r = (await crmFindFreeSlots.handler(
-      { event_type_slug: "c", de: "2026-09-01T00:00:00Z", ate: "2027-09-01T00:00:00Z" },
+      { event_type_slug: "c", dia: "2026-09-01", dias_a_frente: 7 },
       ctx,
-    )) as { motivo: string; mensagem: string };
-    expect(r.motivo).toBe("periodo_longo_demais");
-    expect(r.mensagem).toMatch(/62/);
+    )) as { horarios: unknown[]; total_de_horarios: number };
+    expect(r.total_de_horarios).toBe(1);
+    expect(horariosLivresDaOrg).toHaveBeenCalled();
+    const params = vi.mocked(horariosLivresDaOrg).mock.calls[0]![2];
+    // A janela consultada é a ampla do dia 2026-09-01 (-14h/+38h), ignorando o dias_a_frente: 7
+    expect(params.de.toISOString()).toBe("2026-08-31T10:00:00.000Z");
+    expect(params.ate.toISOString()).toBe("2026-09-02T14:00:00.000Z");
   });
 
   it("⚠️ a recusa que sai é a do CLIENTE, nunca a do OPERADOR", async () => {
@@ -311,6 +334,36 @@ describe("as escritas de agenda", () => {
     expect(handlers.marcarAgendamentoHandler).not.toHaveBeenCalled();
   });
 
+  it("endereço e observação passam ao handler; notes continua interno", async () => {
+    vi.mocked(idDoTipoPorSlug).mockResolvedValue({ id: "t-1", nome: "Consulta" });
+    vi.mocked(handlers.marcarAgendamentoHandler).mockResolvedValue({
+      id: "a-1",
+      status: "confirmed",
+      meeting_state: null,
+      meeting_url: null,
+    });
+    await crmBookAppointment.handler(
+      {
+        event_type_slug: "consulta",
+        starts_at: "2026-09-01T14:00:00Z",
+        contact_id: "11111111-1111-4111-8111-111111111111",
+        location_details: "Rua 1",
+        description: "Trazer RG",
+        notes: "queixa interna",
+      },
+      ctx,
+    );
+    expect(handlers.marcarAgendamentoHandler).toHaveBeenCalledWith(
+      ctx.supabase,
+      expect.anything(),
+      expect.objectContaining({
+        location_details: "Rua 1",
+        description: "Trazer RG",
+        notes: "queixa interna",
+      }),
+    );
+  });
+
   it("a organização vem do CONTEXTO do agente, nunca do argumento", async () => {
     // O handler recebe `organization_id` por parâmetro justamente para servir à tool,
     // e pelo MCP o client é service-role: a RLS não filtra. Se isto vier do input, é
@@ -339,4 +392,35 @@ describe('Meet no contrato do atendimento',()=>{
   const result=await crmListAppointments.handler({contact_id:'contact'},ctx);
   expect(JSON.stringify(result)).toContain('https://meet.google.com/abc-defg-hij');expect(JSON.stringify(result)).not.toContain('old-link');
  });
+});
+
+describe("idempotência da marcação", () => {
+  it("encaminha a chave externa e o job estável ao handler compartilhado", async () => {
+    vi.clearAllMocks();
+    vi.mocked(idDoTipoPorSlug).mockResolvedValue({ id: "t-1", nome: "Consulta" });
+    vi.mocked(handlers.marcarAgendamentoHandler).mockResolvedValue({
+      id: "a-1",
+      status: "confirmed",
+      meeting_state: "none",
+      meeting_url: null,
+    });
+
+    await crmBookAppointment.handler(
+      {
+        event_type_slug: "consulta",
+        starts_at: "2026-09-01T14:00:00Z",
+        contact_id: "11111111-1111-4111-8111-111111111111",
+      },
+      {
+        ...ctx,
+        idempotencyKey: "00000000-0000-4000-8000-0000000000cc",
+        sourceJobId: "00000000-0000-4000-8000-0000000000bb",
+      },
+    );
+
+    expect(vi.mocked(handlers.marcarAgendamentoHandler).mock.calls[0]?.[1]).toMatchObject({
+      idempotencyKey: "00000000-0000-4000-8000-0000000000cc",
+      sourceJobId: "00000000-0000-4000-8000-0000000000bb",
+    });
+  });
 });

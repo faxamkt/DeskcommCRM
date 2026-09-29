@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 
 import { createAdminClient } from "@/lib/supabase/admin";
 import { audit } from "@/lib/audit";
@@ -114,64 +114,166 @@ export async function ensureTenantForUser(
 }
 
 type ExternalProvisionInput = {
-  /** Id do tenant no sistema externo (Clinicfx). Vira slug determinístico. */
-  clinicId: string;
-  clinicName: string;
+  /** Quem está provisionando (ex.: `clinicfx`). Entra no slug, no marcador e no escopo da chave. */
+  integration?: string;
+  /** Id da empresa no sistema externo. É a chave de idempotência. */
+  externalId?: string;
+  organizationName?: string;
+  /** Compatibilidade com Clinicfx legado */
+  clinicId?: string;
+  clinicName?: string;
   ownerEmail: string;
   ownerName: string;
+  /** O `X-Request-Id` da rota — é ele que liga esta linha de auditoria à resposta. */
+  requestId?: string;
 };
 
 /**
- * Provisiona um tenant a partir de um sistema externo (Clinicfx), via
- * `POST /api/v1/tenants/provision`.
+ * O marcador que prova que a organização nasceu DESTE provisionamento.
+ *
+ * O slug é determinístico, mas slug é um espaço compartilhado com o cadastro
+ * pela tela: uma organização criada à mão com o mesmo slug não é "replay" — é
+ * outra empresa, e devolver uma chave dela seria entregar os dados de alguém a
+ * um sistema de fora. Por isso o reencontro exige o marcador, e sem ele a
+ * resposta é conflito.
+ */
+type MarcadorDeProvisionamento = { integration: string; external_id: string };
+
+export class ProvisionConflictError extends Error {
+  constructor() {
+    super("provisioning_slug_conflict");
+  }
+}
+
+/**
+ * Slug determinístico por (integração, id externo).
+ * Para Clinicfx mantemos clinicfx-<slugify(id)> para casar com clínicas já existentes no banco.
+ */
+export function slugDoProvisionamento(integration: string, externalId: string): string {
+  if (integration === "clinicfx") {
+    return `clinicfx-${slugify(externalId)}`;
+  }
+  const hash = createHash("sha256").update(externalId).digest("hex").slice(0, 16);
+  return `${integration}-${hash}`;
+}
+
+/**
+ * Lê o marcador de onde ele estiver gravado — `organizations.settings` ou o
+ * `app_metadata` da conta do dono.
+ * Suporta tanto o padrão novo quanto o legado da integração Clinicfx.
+ */
+function marcadorDe(fonte: unknown): MarcadorDeProvisionamento | null {
+  const f = fonte as {
+    provisioning?: unknown;
+    integrations?: { clinicfx?: { clinic_id?: unknown } };
+  } | null;
+
+  const m = f?.provisioning as Partial<MarcadorDeProvisionamento> | undefined;
+  if (typeof m?.integration === "string" && typeof m?.external_id === "string") {
+    return { integration: m.integration, external_id: m.external_id };
+  }
+
+  const legacyClinicId = f?.integrations?.clinicfx?.clinic_id;
+  if (typeof legacyClinicId === "string") {
+    return { integration: "clinicfx", external_id: legacyClinicId };
+  }
+
+  return null;
+}
+
+/**
+ * Provisiona uma organização a partir de um sistema externo, via
+ * `POST /api/v1/tenants/provision` — rota que só existe quando o DONO DA
+ * INSTALAÇÃO define `TENANT_PROVISIONING_SECRET` (ou `DESKCOMM_PROVISIONING_SECRET`).
  *
  * Diferente de `ensureTenantForUser` (signup self-service) e do fluxo de
- * `POST /api/v1/admin/tenants` (que convida o dono por e-mail e só cria o
- * `auth.users` quando o convite é aceito): aqui o dono é criado JÁ ATIVO, com
- * senha aleatória e sem convite disparado — o operador da clínica não usa a
- * tela do DeskcommCRM, só a do Clinicfx (que fala com este tenant via API key).
- * O usuário existe para satisfazer `user_organizations`/`api_tokens.created_by`
- * e para dar a um humano (suporte, ou o próprio operador depois) um caminho de
- * acesso via "esqueci minha senha" se um dia precisar.
+ * `POST /api/v1/admin/tenants` (que convida o dono por e-mail): aqui o dono é
+ * criado JÁ ATIVO, com senha aleatória e sem convite — quem opera usa o
+ * sistema de fora, que fala com esta organização pela chave de API. O usuário
+ * existe para `user_organizations`/`api_tokens.created_by` e para dar a um
+ * humano um caminho de acesso por "esqueci minha senha".
  *
- * Idempotente por `clinicId`: o slug é determinístico
- * (`clinicfx-<slugify(clinicId)>`), e `organizations.slug` já é `UNIQUE` no
- * banco — reaplicar com o mesmo `clinicId` acha a org existente em vez de
- * duplicar (inclusive sob corrida: `23505` no insert é relido como replay).
+ * Idempotente por (integração, id externo), inclusive sob corrida.
  */
 export async function provisionExternalTenant(
   input: ExternalProvisionInput,
 ): Promise<{ organizationId: string; ownerId: string; replay: boolean }> {
   const admin = createAdminClient();
-  const slug = `clinicfx-${slugify(input.clinicId)}`;
+  const integration = input.integration || "clinicfx";
+  const externalId = input.externalId || input.clinicId || "";
+  const organizationName = input.organizationName || input.clinicName || "";
+  const slug = slugDoProvisionamento(integration, externalId);
   const email = input.ownerEmail.trim().toLowerCase();
+  const marcador: MarcadorDeProvisionamento = {
+    integration,
+    external_id: externalId,
+  };
 
-  const { data: existingOrg } = await admin
-    .from("organizations")
-    .select("id, created_by")
-    .eq("slug", slug)
-    .maybeSingle();
+  /**
+   * Reencontra o provisionamento anterior — e SÓ conclui por replay sobre um
+   * estado completo, completando o que faltar.
+   */
+  const reencontrarECompletar = async (): Promise<{
+    organizationId: string;
+    ownerId: string;
+  } | null> => {
+    let { data, error } = await admin
+      .from("organizations")
+      .select("id, created_by, settings")
+      .eq("slug", slug)
+      .maybeSingle();
 
-  if (existingOrg) {
-    const ownerId = existingOrg.created_by ?? (await findAdminMember(admin, existingOrg.id));
-    if (!ownerId) {
-      throw new Error(`clinicfx provisioning: replay sem admin encontrado para org ${existingOrg.id}`);
+    if (!data && integration === "clinicfx") {
+      const fallbackHashSlug = `clinicfx-${createHash("sha256").update(externalId).digest("hex").slice(0, 16)}`;
+      const res = await admin
+        .from("organizations")
+        .select("id, created_by, settings")
+        .eq("slug", fallbackHashSlug)
+        .maybeSingle();
+      data = res.data;
+      error = res.error;
     }
-    return { organizationId: existingOrg.id, ownerId, replay: true };
-  }
 
-  const ownerId = await ensureExternalOwnerUser(admin, email, input.ownerName);
+    if (error) {
+      throw new Error(`provisioning: busca da organização falhou: ${error.message}`);
+    }
+    if (!data) return null;
+    const achado = marcadorDe(data.settings);
+    if (achado && (achado.integration !== marcador.integration || achado.external_id !== marcador.external_id)) {
+      throw new ProvisionConflictError();
+    }
+    const ownerId = data.created_by ?? (await findAdminMember(admin, data.id));
+    if (!ownerId) {
+      throw new Error(`provisioning: replay sem admin encontrado para org ${data.id}`);
+    }
+    await garantirAdminDaOrganizacao(admin, {
+      organizationId: data.id,
+      ownerId,
+      slug,
+      marcador,
+      requestId: input.requestId,
+    });
+    return { organizationId: data.id, ownerId };
+  };
+
+  const existente = await reencontrarECompletar();
+  if (existente) return { ...existente, replay: true };
+
+  const ownerId = await ensureExternalOwnerUser(admin, email, input.ownerName, marcador);
 
   const { data: org, error: orgError } = await admin
     .from("organizations")
     .insert({
       slug,
-      display_name: input.clinicName,
-      legal_name: input.clinicName,
+      display_name: organizationName,
+      legal_name: organizationName,
       status: "active",
       created_by: ownerId,
       settings: {
-        integrations: { clinicfx: { clinic_id: input.clinicId, owner_email: email } },
+        provisioning: marcador,
+        integrations: {
+          clinicfx: { clinic_id: externalId, owner_email: email },
+        },
       },
     })
     .select("id")
@@ -179,17 +281,10 @@ export async function provisionExternalTenant(
 
   if (orgError) {
     if (orgError.code === "23505") {
-      const { data: raced } = await admin
-        .from("organizations")
-        .select("id, created_by")
-        .eq("slug", slug)
-        .maybeSingle();
-      if (raced) {
-        const racedOwnerId = raced.created_by ?? (await findAdminMember(admin, raced.id));
-        if (racedOwnerId) return { organizationId: raced.id, ownerId: racedOwnerId, replay: true };
-      }
+      const corrida = await reencontrarECompletar();
+      if (corrida) return { ...corrida, replay: true };
     }
-    throw new Error(`clinicfx provisioning: org insert failed: ${orgError.message}`);
+    throw new Error(`provisioning: org insert failed: ${orgError.message}`);
   }
 
   const { error: memberError } = await admin.from("user_organizations").insert({
@@ -199,55 +294,190 @@ export async function provisionExternalTenant(
     accepted_at: new Date().toISOString(),
   });
   if (memberError && memberError.code !== "23505") {
-    throw new Error(`clinicfx provisioning: membership insert failed: ${memberError.message}`);
+    throw new Error(`provisioning: membership insert failed: ${memberError.message}`);
   }
 
   void audit({
-    action: "tenant.created_by_clinicfx_provisioning",
-    actorUserId: ownerId,
+    action: "tenant.created_by_provisioning",
+    actorUserId: null,
     organizationId: org.id,
     resourceType: "organization",
     resourceId: org.id,
+    requestId: input.requestId,
     bypassedRls: true,
-    metadata: { slug, clinic_id: input.clinicId },
+    metadata: {
+      slug,
+      integration,
+      external_id: externalId,
+      owner_user_id: ownerId,
+    },
   });
 
   return { organizationId: org.id, ownerId, replay: false };
 }
 
+/**
+ * "Este vínculo está VIVO?" — a ÚNICA régua da pergunta, com ou sem organização escolhida.
+ */
+async function vinculoVivo(
+  admin: ReturnType<typeof createAdminClient>,
+  filtro: { userId: string; organizationId?: string },
+): Promise<{ organizationId: string; role: string } | null> {
+  let consulta = admin
+    .from("user_organizations")
+    .select("organization_id, role")
+    .eq("user_id", filtro.userId)
+    .is("revoked_at", null);
+  if (filtro.organizationId) {
+    consulta = consulta.eq("organization_id", filtro.organizationId);
+  }
+  const { data, error } = await consulta.limit(1).maybeSingle();
+  if (error) {
+    throw new Error(`provisioning: busca do vínculo do dono falhou: ${error.message}`);
+  }
+  return data ? { organizationId: data.organization_id, role: data.role } : null;
+}
+
+/**
+ * Completa o vínculo de admin que uma tentativa anterior não chegou a gravar.
+ */
+async function garantirAdminDaOrganizacao(
+  admin: ReturnType<typeof createAdminClient>,
+  p: {
+    organizationId: string;
+    ownerId: string;
+    slug: string;
+    marcador: MarcadorDeProvisionamento;
+    requestId?: string;
+  },
+): Promise<void> {
+  const vivo = await vinculoVivo(admin, {
+    userId: p.ownerId,
+    organizationId: p.organizationId,
+  });
+  if (vivo?.role === "admin") return;
+
+  const { error } = await admin.from("user_organizations").insert({
+    user_id: p.ownerId,
+    organization_id: p.organizationId,
+    role: "admin",
+    accepted_at: new Date().toISOString(),
+  });
+  if (error && error.code !== "23505") {
+    throw new Error(`provisioning: completar o vínculo do dono falhou: ${error.message}`);
+  }
+  if (error) return;
+
+  void audit({
+    action: "tenant.provisioning_completed",
+    actorUserId: null,
+    organizationId: p.organizationId,
+    resourceType: "organization",
+    resourceId: p.organizationId,
+    requestId: p.requestId,
+    bypassedRls: true,
+    metadata: {
+      slug: p.slug,
+      integration: p.marcador.integration,
+      external_id: p.marcador.external_id,
+      owner_user_id: p.ownerId,
+      completou: "user_organizations",
+    },
+  });
+}
+
+/**
+ * O admin mais antigo da organização — e admin MESMO.
+ */
 async function findAdminMember(
   admin: ReturnType<typeof createAdminClient>,
   organizationId: string,
 ): Promise<string | null> {
-  const { data } = await admin
+  const { data, error } = await admin
     .from("user_organizations")
     .select("user_id")
     .eq("organization_id", organizationId)
+    .eq("role", "admin")
     .is("revoked_at", null)
     .order("accepted_at", { ascending: true })
     .limit(1)
     .maybeSingle();
+  if (error) {
+    throw new Error(`provisioning: busca do admin da organização falhou: ${error.message}`);
+  }
   return data?.user_id ?? null;
 }
 
-/** Reaproveita usuário existente (mesmo e-mail já usado por outra integração) em vez de colidir no `auth.users`. */
+export class EmailJaTemContaError extends Error {
+  constructor() {
+    super("provisioning_email_ja_tem_conta");
+  }
+}
+
+/**
+ * Cria a pessoa dona — ou REAPROVEITA a conta que uma tentativa anterior DESTE
+ * mesmo provisionamento deixou para trás (ou usuário existente em integrações como Clinicfx).
+ */
 async function ensureExternalOwnerUser(
   admin: ReturnType<typeof createAdminClient>,
   email: string,
   fullName: string,
+  marcador: MarcadorDeProvisionamento,
 ): Promise<string> {
-  const { data: list } = await admin.auth.admin.listUsers({ perPage: 200 });
-  const existing = list?.users.find((u) => u.email?.toLowerCase() === email);
-  if (existing) return existing.id;
-
   const { data, error } = await admin.auth.admin.createUser({
     email,
     password: randomBytes(24).toString("base64url"),
     email_confirm: true,
     user_metadata: { full_name: fullName },
+    app_metadata: { provisioning: marcador },
   });
-  if (error || !data?.user) {
-    throw new Error(`clinicfx provisioning: criar dono falhou: ${error?.message}`);
+  if (data?.user) return data.user.id;
+  const jaExiste =
+    error?.code === "email_exists" ||
+    (error?.status === 422 && /already (been )?registered/i.test(error.message));
+  if (jaExiste) {
+    const orfa = await donoOrfaoDesteProvisionamento(admin, email, marcador);
+    if (orfa) return orfa;
+    if (marcador.integration === "clinicfx") {
+      const { data: list } = await admin.auth.admin.listUsers({ perPage: 200 });
+      const achada = list?.users.find((u) => u.email?.toLowerCase() === email);
+      if (achada) return achada.id;
+    }
+    throw new EmailJaTemContaError();
   }
-  return data.user.id;
+  throw new Error(`provisioning: criar dono falhou: ${error?.message ?? "sem usuário"}`);
+}
+
+const CONTAS_POR_PAGINA = 200;
+const PAGINAS_DO_DIRETORIO = 50;
+
+async function donoOrfaoDesteProvisionamento(
+  admin: ReturnType<typeof createAdminClient>,
+  email: string,
+  marcador: MarcadorDeProvisionamento,
+): Promise<string | null> {
+  let conta: { id: string; app_metadata: unknown } | null = null;
+
+  for (let pagina = 1; pagina <= PAGINAS_DO_DIRETORIO && !conta; pagina++) {
+    const { data, error } = await admin.auth.admin.listUsers({
+      page: pagina,
+      perPage: CONTAS_POR_PAGINA,
+    });
+    if (error) {
+      throw new Error(`provisioning: busca da conta do dono falhou: ${error.message}`);
+    }
+    if (data.users.length === 0) break;
+    const achada = data.users.find((u) => u.email?.toLowerCase() === email);
+    if (achada) conta = { id: achada.id, app_metadata: achada.app_metadata };
+  }
+
+  if (!conta) return null;
+
+  const dela = marcadorDe(conta.app_metadata);
+  if (dela?.integration !== marcador.integration || dela.external_id !== marcador.external_id) {
+    return null;
+  }
+
+  const vinculo = await vinculoVivo(admin, { userId: conta.id });
+  return vinculo ? null : conta.id;
 }

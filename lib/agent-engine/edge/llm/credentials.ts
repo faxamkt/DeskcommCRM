@@ -26,6 +26,7 @@ import {
   type ChaveDeOrcamento,
   type ModoDeOrcamento,
 } from './orcamento';
+import type { RaciocinioDeepseek } from './providers';
 import type { CacheTtl } from './stable-prefix';
 
 /** Config da camada LLM montada do env validado (padrão crmEdgeConfigFromEnv). */
@@ -54,6 +55,12 @@ export interface LlmEdgeConfig {
    * monta a config na mão (testes) — o seam aplica a doutrina '1h' quando ausente.
    */
   cacheTtl?: CacheTtl;
+  /**
+   * Toggle do raciocínio (thinking) da DeepSeek — knob DEEPSEEK_THINKING.
+   * Ausente = `'provider'`: o provedor decide (raciocínio LIGADO). Só a
+   * DeepSeek lê este valor; os outros provedores não passam por essa fábrica.
+   */
+  deepseekThinking?: RaciocinioDeepseek;
   /**
    * `AI_BUDGET_ENFORCEMENT` já normalizado — o kill switch do operador da
    * instalação. Ausente = `'on'`, e `'on'` NÃO LIGA NADA: significa apenas
@@ -85,16 +92,22 @@ export function llmEdgeConfigFromEnv(env: {
   OPENROUTER_API_KEY?: string;
   LLM_CACHE_TTL?: string;
   AI_BUDGET_ENFORCEMENT?: string;
+  DEEPSEEK_THINKING?: string;
 }): LlmEdgeConfig {
   const ttl = env.LLM_CACHE_TTL ?? '1h';
   if (ttl !== '5m' && ttl !== '1h') {
     throw new Error("LLM_CACHE_TTL inválido — use '5m' ou '1h' (default 1h)");
+  }
+  const raciocinio = env.DEEPSEEK_THINKING ?? 'provider';
+  if (raciocinio !== 'provider' && raciocinio !== 'disabled') {
+    throw new Error("DEEPSEEK_THINKING inválido — use 'provider' ou 'disabled' (default provider)");
   }
   return {
     ...(env.ANTHROPIC_API_KEY ? { anthropicApiKey: env.ANTHROPIC_API_KEY } : {}),
     ...(env.OPENAI_API_KEY ? { openaiApiKey: env.OPENAI_API_KEY } : {}),
     ...(env.OPENROUTER_API_KEY ? { openrouterApiKey: env.OPENROUTER_API_KEY } : {}),
     cacheTtl: ttl,
+    deepseekThinking: raciocinio,
     // Sem `if` de valor vazio, ao contrário das chaves acima: aqui o ausente
     // TEM um significado ('on'), e o normalizador é quem o dá. Um campo
     // opcional que some faria o seam ter de repetir o default, e dois defaults
@@ -132,10 +145,28 @@ export interface OrcamentoDaOrg {
   limiarPct: number;
 }
 
+/**
+ * De QUEM é a chave que o resolvedor devolveu. Mesmo vocabulário de
+ * `lib/ai/embeddings/chave.ts`, que responde a mesma pergunta para embedding.
+ */
+export type OrigemDaChaveLlm = 'credencial_da_organizacao' | 'chave_da_instalacao';
+
 export interface OrgLlmConfig {
   provider: string;
   /** plaintext decifrado — existe só em memória, jamais logado/persistido */
   apiKey: string;
+  /**
+   * `chave_da_instalacao` = a organização não tinha credencial ativa e validada
+   * para o provedor (ou a escolhida foi revogada) e a escada caiu no `.env` —
+   * a chave que paga a conta de TODAS as empresas desta instalação.
+   *
+   * Existe para quem decide PARA ONDE a chave pode ir. O endereço de um ponto
+   * (`ai_purpose_bindings.base_url`) é escolhido por quem administra a
+   * organização; a chave da instalação não pode acompanhá-lo (decisão 22-a do
+   * dono do produto). Antes deste campo, o único jeito de saber era comparar o
+   * plaintext com as chaves do `.env`, e cada caminho fazia a sua comparação.
+   */
+  origemDaChave: OrigemDaChaveLlm;
   defaultModel: string | null;
   params: Record<string, unknown>;
   enabledModels: string[];
@@ -150,6 +181,16 @@ export interface OrgLlmConfig {
    * ABERTO na informação de falhar em silêncio.
    */
   orcamentoIndisponivelPorque: string | null;
+  /**
+   * O endereço da PRÓPRIA credencial, e só o provedor personalizado (#1642) tem
+   * um (`ai_provider_credentials.base_url`). `null` nos nativos: o endpoint deles
+   * é intrínseco.
+   *
+   * Lido numa query SEPARADA e só quando o provider é `custom`: o resolvedor
+   * nunca pode cair por schema atrasado num clone que ainda não aplicou a 0413,
+   * e nenhum provedor nativo paga o preço de uma coluna nova.
+   */
+  baseUrl: string | null;
 }
 
 // Leitura DEFENSIVA de organizations.settings->'llm' (jsonb livre): campo com
@@ -296,11 +337,12 @@ export async function resolveOrgLlmConfig(
   // senão a mais recente ativa/validada do provider. Sempre escopada pela org.
   const { rows: credRows } = override?.credentialId
     ? await db.query<{
+        id: string;
         api_key_encrypted: unknown;
         api_key_iv: unknown;
         api_key_tag: unknown;
       }>(
-        `select api_key_encrypted, api_key_iv, api_key_tag
+        `select id, api_key_encrypted, api_key_iv, api_key_tag
          from ai_provider_credentials
          where organization_id = $1 and id = $2
            and is_active and validated_at is not null
@@ -308,11 +350,12 @@ export async function resolveOrgLlmConfig(
         [organizationId, override.credentialId],
       )
     : await db.query<{
+        id: string;
         api_key_encrypted: unknown;
         api_key_iv: unknown;
         api_key_tag: unknown;
       }>(
-        `select api_key_encrypted, api_key_iv, api_key_tag
+        `select id, api_key_encrypted, api_key_iv, api_key_tag
          from ai_provider_credentials
          where organization_id = $1 and provider = $2
            and is_active and validated_at is not null
@@ -322,6 +365,9 @@ export async function resolveOrgLlmConfig(
       );
 
   let apiKey: string;
+  // Atribuída junto com a chave, em cada degrau: a origem é um fato de QUAL
+  // ramo escolheu a chave, e só este ponto sabe isso sem adivinhar.
+  let origemDaChave: OrigemDaChaveLlm;
   const cred = credRows[0];
   if (cred !== undefined) {
     apiKey = decryptKey({
@@ -329,19 +375,43 @@ export async function resolveOrgLlmConfig(
       iv: byteaToBuffer(cred.api_key_iv),
       tag: byteaToBuffer(cred.api_key_tag),
     });
+    origemDaChave = 'credencial_da_organizacao';
   } else if (provider === 'anthropic' && cfg.anthropicApiKey) {
     apiKey = cfg.anthropicApiKey;
+    origemDaChave = 'chave_da_instalacao';
   } else if (provider === 'openai' && cfg.openaiApiKey) {
     apiKey = cfg.openaiApiKey;
+    origemDaChave = 'chave_da_instalacao';
   } else if (provider === 'openrouter' && cfg.openrouterApiKey) {
     apiKey = cfg.openrouterApiKey;
+    origemDaChave = 'chave_da_instalacao';
   } else {
     throw new LlmNotConfiguredError();
+  }
+
+  // O ENDEREÇO do provedor personalizado (#1642), na mesma linha da chave que
+  // acima. Query separada e condicionada ao provider: se o clone ainda não
+  // aplicou a 0413, só este caminho novo sente a falta (o erro vira `null` e o
+  // registry recusa a chamada com a frase certa) — os quatro nativos seguem sem
+  // tocar numa coluna que ainda não existe.
+  let baseUrl: string | null = null;
+  if (provider === "custom" && cred !== undefined) {
+    try {
+      const { rows: urlRows } = await db.query<{ base_url: string | null }>(
+        `select base_url from ai_provider_credentials where id = $1 and organization_id = $2 limit 1`,
+        [cred.id, organizationId],
+      );
+      baseUrl = urlRows[0]?.base_url ?? null;
+    } catch {
+      baseUrl = null;
+    }
   }
 
   return {
     provider,
     apiKey,
+    baseUrl,
+    origemDaChave,
     defaultModel: settings.default_model ?? null,
     params: settings.params,
     enabledModels: settings.enabled_models,

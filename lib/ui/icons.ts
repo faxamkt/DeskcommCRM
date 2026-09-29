@@ -49,6 +49,7 @@ export {
   List,
   Bell,
   BellSlash,
+  EnvelopeSimple,
   PaperPlaneTilt,
   Smiley,
   Check,
@@ -77,6 +78,7 @@ export {
   // lgpd
   Scales as ScalesSimple,
   Eye,
+  EyeSlash,
   ChartBar,
   ClockCountdown,
   // painéis de evolução / aprendizado
@@ -88,15 +90,23 @@ export {
   MonitorPlay,
   // conversation
   ChatCircle,
+  WhatsappLogo,
+  InstagramLogo,
+  MessengerLogo,
   Phone,
+  PhoneIncoming,
+  PhoneOutgoing,
+  PhoneX,
   Paperclip,
   Microphone,
+  MicrophoneSlash,
   Image as ImageIcon,
   ImageSquare,
   MusicNote,
   Note,
   FileText,
   Lock,
+  LockOpen,
   Receipt,
   Tag,
   Question,
@@ -104,6 +114,7 @@ export {
   // followup flow builder (Task 6.2)
   GitBranch,
   Flag,
+  TreeStructure,
   // misc
   DotsThree,
   CaretDown,
@@ -137,4 +148,6 @@ export {
   GoogleLogo,
   MapPin,
   ArrowsOutSimple,
+  // /admin/modulos: módulo opcional com tabela própria (ADR-0002)
+  Stack,
 } from "@phosphor-icons/react/dist/ssr";

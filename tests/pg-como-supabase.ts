@@ -18,7 +18,8 @@
  *    organizações é medido pelos invariantes que usam papel restrito — não aqui.
  * 2. **Rede.** Timeout, retry e erro de transporte não existem neste caminho.
  * 3. **A superfície inteira do PostgREST.** Só o que está implementado abaixo:
- *    `select/insert` com `eq`, `order`, `limit`, `maybeSingle`, `single`. Um
+ *    `select/insert` com `eq`, `order`, `limit`, `maybeSingle`, `single` e
+ *    embed to-one (`alias:coluna_fk(colunas)`, traduzido para subquery). Um
  *    método não implementado **estoura** em vez de ser ignorado em silêncio —
  *    ver `naoImplementado`. Silêncio aqui viraria teste verde medindo nada.
  *
@@ -55,13 +56,119 @@ function erroDe(e: unknown): ErroPg {
   return { message: bruto?.message ?? String(e), code: bruto?.code };
 }
 
+/**
+ * `is null|true|false` — o `is` não aceita placeholder: a gramática do SQL exige
+ * a palavra depois do operador, e `x is $1` é erro de sintaxe.
+ */
+function literalDeIs(valor: unknown): string {
+  if (valor === null || valor === undefined) return "null";
+  if (valor === true) return "true";
+  if (valor === false) return "false";
+  return naoImplementado(`is(${JSON.stringify(valor)})`);
+}
+
+/**
+ * `(read,delivered)` — a lista que o PostgREST manda em `.not(col, "in", ...)`.
+ *
+ * As aspas duplas protegem vírgula DENTRO do valor, então o corte passa pelo
+ * `fatiarNoTopo` em vez de um `split(",")` cru.
+ */
+function listaDoPostgrest(bruto: unknown): string[] {
+  if (Array.isArray(bruto)) return bruto.map((x) => String(x));
+  const texto = String(bruto ?? "").trim();
+  const dentro = texto.startsWith("(") && texto.endsWith(")") ? texto.slice(1, -1) : texto;
+  if (dentro.trim() === "") return [];
+  return fatiarNoTopo(dentro).map((v) => v.trim().replace(/^"(.*)"$/, "$1"));
+}
+
 /** Aspas em cada coluna: `slug`, `position` e afins são palavras vivas no SQL. */
 function colunasSql(colunas: string): string {
   if (colunas.trim() === "*") return "*";
-  return colunas
-    .split(",")
+  return fatiarNoTopo(colunas)
     .map((c) => `"${c.trim()}"`)
     .join(", ");
+}
+
+/**
+ * Fatia por vírgula **de topo** — a que está fora de parênteses.
+ *
+ * `"id, contacts:contact_id(a, b)"` tem três vírgulas e só DUAS colunas. Um
+ * `split(",")` cru quebraria o embed no meio e pediria ao Postgres uma coluna
+ * chamada `contacts:contact_id(a`.
+ */
+function fatiarNoTopo(lista: string): string[] {
+  const partes: string[] = [];
+  let profundidade = 0;
+  let atual = "";
+  for (const ch of lista) {
+    if (ch === "(") profundidade += 1;
+    if (ch === ")") profundidade -= 1;
+    if (ch === "," && profundidade === 0) {
+      partes.push(atual);
+      atual = "";
+      continue;
+    }
+    atual += ch;
+  }
+  if (atual.trim() !== "") partes.push(atual);
+  return partes;
+}
+
+/**
+ * EMBED do PostgREST — `alias:coluna_fk(colunas)`.
+ *
+ * Nasceu porque `sendMessageHandler` (a ÚNICA porta de saída de mensagem do
+ * produto) lê a conversa com dois embeds — `contacts:contact_id(...)` e
+ * `channel_sessions:channel_session_id(...)`. Sem tradução, esse select
+ * ESTOURAVA no adaptador, e qualquer invariante sobre o caminho de envio
+ * morria num 500 genérico em vez de medir a decisão do handler.
+ *
+ * A tabela do embed é o ALIAS. É a convenção que o repo inteiro usa (o alias
+ * nomeia a tabela referenciada), e o custo de errar é barulhento — `relation
+ * "x" does not exist` — nunca silencioso.
+ *
+ * Zero linhas vira `null`, como o PostgREST devolve para um embed to-one sem
+ * correspondente. É o caso real de conversa sem canal.
+ */
+interface Embed {
+  alias: string;
+  colunaFk: string;
+  colunas: string;
+}
+
+function lerEmbed(pedaco: string): Embed | null {
+  const m = /^\s*([A-Za-z0-9_]+)\s*:\s*([A-Za-z0-9_]+)\s*\(([^]*)\)\s*$/.exec(pedaco);
+  if (!m) return null;
+  return { alias: m[1]!, colunaFk: m[2]!, colunas: m[3]! };
+}
+
+function embedSql(e: Embed, aliasExterno: string): string {
+  const cols = fatiarNoTopo(e.colunas)
+    .map((c) => `"${c.trim()}"`)
+    .join(", ");
+  return (
+    `(select to_jsonb(emb) from (select ${cols} from public."${e.alias}" ` +
+    `where "id" = ${aliasExterno}."${e.colunaFk}") emb) as "${e.alias}"`
+  );
+}
+
+/**
+ * Projeção do `select`, já com os embeds traduzidos. Devolve também se houve
+ * embed: quando há, o FROM precisa de alias para a subquery poder apontar para
+ * a coluna de FK da linha externa.
+ */
+function projecaoSql(colunas: string, aliasExterno: string): { sql: string; temEmbed: boolean } {
+  if (colunas.trim() === "*") return { sql: "*", temEmbed: false };
+  let temEmbed = false;
+  const sql = fatiarNoTopo(colunas)
+    .map((pedaco) => {
+      const embed = lerEmbed(pedaco);
+      if (!embed) return `"${pedaco.trim()}"`;
+      temEmbed = true;
+      return embedSql(embed, aliasExterno);
+    })
+    .join(", ");
+  return { sql, temEmbed };
 }
 
 class ConsultaPg<T> implements PromiseLike<RespostaFalsa<T[]>> {
@@ -79,6 +186,35 @@ class ConsultaPg<T> implements PromiseLike<RespostaFalsa<T[]>> {
   eq(coluna: string, valor: unknown): this {
     this.filtros.push(["=", coluna, valor]);
     return this;
+  }
+
+  /**
+   * `is` — a coluna contra `null`/`true`/`false`.
+   *
+   * Nasceu sob pressão do ingest do Zernio, que escreve o telefone do contato
+   * só quando ele está vazio (`contacts.phone_number is null`)
+   * e resolve número interno de aviso por `.is("phone_number", null)`.
+   * Um `is` que não filtrasse deixaria o teste afirmar coisa que não mediu.
+   */
+  is(coluna: string, valor: unknown): this {
+    this.filtros.push(["is", coluna, valor]);
+    return this;
+  }
+
+  /**
+   * `.not(coluna, operador, valor)` — a negação do PostgREST é textual, no
+   * terceiro argumento (`(read,delivered)`), não um método próprio por operador.
+   */
+  not(coluna: string, operador: string, valor: unknown): this {
+    if (operador === "in") {
+      this.filtros.push(["not = any", coluna, listaDoPostgrest(valor)]);
+      return this;
+    }
+    if (operador === "eq") {
+      this.filtros.push(["<>", coluna, valor]);
+      return this;
+    }
+    return naoImplementado(`not(${operador})`);
   }
 
   /**
@@ -127,10 +263,26 @@ class ConsultaPg<T> implements PromiseLike<RespostaFalsa<T[]>> {
     return this;
   }
 
-  /** Presentes para ESTOURAR: o código que os usar precisa de implementação real. */
-  in(): never {
-    return naoImplementado("in");
+  /**
+   * `in` — QUINTA vez que o `naoImplementado` se paga, e desta vez o estouro
+   * veio de um PR de contribuidor: a cascata de LGPD passou a cancelar a régua
+   * do contato anonimizado com `.in("status", STATUS_DA_REGUA_VIVA)`
+   * (`lib/lgpd/cascata.ts:221`), e o invariante que exercita a anonimização
+   * estourou aqui em vez de ficar verde.
+   *
+   * O que teria acontecido com um `in` que devolvesse vazio: "nenhuma régua
+   * viva" é o desfecho natural de uma lista vazia, então o teste passaria
+   * afirmando que a cascata cancelou a régua — sem ela ter cancelado nada.
+   *
+   * `= any($n)` e não `in ($1,$2,…)` porque a lista é um parâmetro só: número
+   * variável de placeholders reabriria a porta de montar SQL por concatenação.
+   */
+  in(coluna: string, valores: readonly unknown[]): this {
+    this.filtros.push(["= any", coluna, [...valores]]);
+    return this;
   }
+
+  /** Presentes para ESTOURAR: o código que os usar precisa de implementação real. */
   neq(): never {
     return naoImplementado("neq");
   }
@@ -138,10 +290,20 @@ class ConsultaPg<T> implements PromiseLike<RespostaFalsa<T[]>> {
   private montar(): { texto: string; valores: unknown[] } {
     const valores: unknown[] = [];
     const onde = this.filtros.map(([op, c, v]) => {
+      // `is` não gasta placeholder: a palavra entra inline.
+      if (op === "is") return `"${c}" is ${literalDeIs(v)}`;
       valores.push(v);
+      // `= any` recebe o array inteiro num placeholder só; os demais operadores
+      // são infixos comuns.
+      if (op === "= any") return `"${c}" = any($${valores.length})`;
+      if (op === "not = any") return `not ("${c}" = any($${valores.length}))`;
       return `"${c}" ${op} $${valores.length}`;
     });
-    let texto = `select ${colunasSql(this.colunas)} from public."${this.tabela}"`;
+    const projecao = projecaoSql(this.colunas, "linha");
+    let texto = `select ${projecao.sql} from public."${this.tabela}"`;
+    // O alias só entra quando há embed: a subquery precisa apontar para a
+    // coluna de FK DA LINHA EXTERNA, e sem alias a referência seria ambígua.
+    if (projecao.temEmbed) texto += " linha";
     if (onde.length > 0) texto += ` where ${onde.join(" and ")}`;
     if (this.ordem) texto += ` order by "${this.ordem.coluna}" ${this.ordem.asc ? "asc" : "desc"}`;
     if (this.teto !== null) texto += ` limit ${this.teto}`;
@@ -263,7 +425,8 @@ class InsercaoPg<T> implements PromiseLike<RespostaFalsa<null>> {
  * nada). O `naoImplementado` fez o trabalho dele.
  */
 class AtualizacaoPg<T> implements PromiseLike<RespostaFalsa<unknown>> {
-  private filtros: Array<[string, unknown]> = [];
+  /** [operador, coluna, valor] — mesmo contrato do `ConsultaPg`. */
+  private filtros: Array<[string, string, unknown]> = [];
   private colunasDeVolta: string | null = null;
 
   constructor(
@@ -273,8 +436,34 @@ class AtualizacaoPg<T> implements PromiseLike<RespostaFalsa<unknown>> {
   ) {}
 
   eq(coluna: string, valor: unknown): this {
-    this.filtros.push([coluna, valor]);
+    this.filtros.push(["=", coluna, valor]);
     return this;
+  }
+
+  /**
+   * `.is()` na ESCRITA — o caminho que motivou a peça.
+   *
+   * O ingest do Zernio grava o telefone do contato recém-criado com
+   * `update(...).eq("id", id).is("phone_number", null)`: a condição é uma
+   * TRAVA, o telefone só é escrito se ainda estiver vazio. Sem `is` no
+   * builder de update, esse `update` estourava em vez de filtrar.
+   */
+  is(coluna: string, valor: unknown): this {
+    this.filtros.push(["is", coluna, valor]);
+    return this;
+  }
+
+  /** `.not(coluna, operador, valor)` — a negação textual do PostgREST. */
+  not(coluna: string, operador: string, valor: unknown): this {
+    if (operador === "in") {
+      this.filtros.push(["not = any", coluna, listaDoPostgrest(valor)]);
+      return this;
+    }
+    if (operador === "eq") {
+      this.filtros.push(["<>", coluna, valor]);
+      return this;
+    }
+    return naoImplementado(`not(${operador})`);
   }
 
   select(colunas = "*"): this {
@@ -289,9 +478,12 @@ class AtualizacaoPg<T> implements PromiseLike<RespostaFalsa<unknown>> {
       valores.push(v !== null && typeof v === "object" && !Array.isArray(v) ? JSON.stringify(v) : v);
       return `"${k}" = $${valores.length}`;
     });
-    const onde = this.filtros.map(([c, v]) => {
+    const onde = this.filtros.map(([op, c, v]) => {
+      // `is` não gasta placeholder: a palavra entra inline.
+      if (op === "is") return `"${c}" is ${literalDeIs(v)}`;
       valores.push(v);
-      return `"${c}" = $${valores.length}`;
+      if (op === "not = any") return `not ("${c}" = any($${valores.length}))`;
+      return `"${c}" ${op} $${valores.length}`;
     });
     let texto = `update public."${this.tabela}" set ${sets.join(", ")}`;
     if (onde.length > 0) texto += ` where ${onde.join(" and ")}`;

@@ -6,7 +6,7 @@ import {
   type SilenceSweepDb,
   type SilencePointer,
 } from "@/lib/followup/silence-sweep";
-import { isPointerEnabledForAutomaticTrigger, type FollowupGateDb } from "@/lib/followup/agent-followup-gate";
+import { isPointerEnabledForAutomaticTrigger, noDeGatilhoDoGrafo, type FollowupGateDb } from "@/lib/followup/agent-followup-gate";
 import { CONVERSATION_TERMINAL_STATUSES } from "@/lib/schemas";
 import type { FlowGraph } from "@/lib/followup/graph-schema";
 
@@ -18,8 +18,8 @@ import type { FlowGraph } from "@/lib/followup/graph-schema";
  * Congela: (1) pointer silence habilitado no gate + contato silêncio >
  * threshold → exatamente 1 enrollment nascendo no nó trigger; rodar a
  * varredura DE NOVO não duplica (unique-live, `idx_followup_enrollments_one_live`);
- * (2) o MESMO cenário mas SEM nenhum agente publicado habilitando o pointer →
- * 0 enrollments (prova que o gate é de fato chamado, não só importado);
+ * (2) o MESMO cenário mas SEM nenhum agente: grafo só de texto enrolla com
+ * `agent_id` nulo; grafo que pede IA é gate-out;
  * (3) contato silencioso HÁ MENOS que o threshold → não enrolla (boundary);
  * silêncio EXATAMENTE igual ao threshold → enrolla (`<=`, não `<`);
  * (4) `isPointerEnabledForAutomaticTrigger` contra `ai_agent_versions` REAL
@@ -33,6 +33,12 @@ import type { FlowGraph } from "@/lib/followup/graph-schema";
  * contato, não a 1ª conversa velha encontrada; contato cuja única conversa
  * nunca recebeu inbound (`last_inbound_at is null`) também NÃO enrolla —
  * "nunca conversou" ≠ "está em silêncio", sem mass-enroll de contato novo.
+ *
+ * (1b) cooldown pós-conclusão (issue de produção, 2026-09-25): um enrollment
+ * deste MESMO pointer que terminou há menos que `threshold_minutes` barra
+ * reinscrição, mesmo com o contato continuando silencioso (o cutoff de
+ * silêncio sozinho reinscreveria a cada tick do cron); terminado há mais que
+ * `threshold_minutes`, reinscreve normalmente.
  */
 
 const container = process.env.TEST_DB_CONTAINER;
@@ -137,13 +143,36 @@ function silenceSweepDb(): SilenceSweepDb {
         .filter((r) => segments.length === 0 || segments.some((s) => r.tags.includes(s)))
         .map((r) => r.contact_id);
     },
-    async loadTriggerNodeId(orgId, versionId) {
+    // Mesma régua de `lib/followup/retorno-segura-o-fluxo.ts`: retorno agendado,
+    // que não é o turno de um passo de fluxo.
+    async loadContatosComRetornoVivo(orgId) {
+      const { rows } = await pool.query<{ contact_id: string }>(
+        `select contact_id from cron_jobs
+          where organization_id = $1 and kind = 'at' and job_kind = 'followup_turn'
+            and enabled and cancelled_at is null and contact_id is not null
+            and payload->>'followup_enrollment_id' is null`,
+        [orgId],
+      );
+      return new Set(rows.map((r) => r.contact_id));
+    },
+    async loadTriggerNode(orgId, versionId) {
       const { rows } = await pool.query<{ graph: FlowGraph }>(
         `select graph from followup_flow_versions where organization_id = $1 and id = $2`,
         [orgId, versionId],
       );
       if (rows.length === 0) return null;
-      return rows[0]!.graph.nodes.find((n) => n.type === "trigger")?.id ?? null;
+      return noDeGatilhoDoGrafo(rows[0]!.graph);
+    },
+    async loadContactIdsEmCooldown(orgId, pointerId, contactIds, cutoffIso) {
+      if (contactIds.length === 0) return new Set();
+      const { rows } = await pool.query<{ contact_id: string }>(
+        `select distinct contact_id from followup_enrollments
+         where organization_id = $1 and pointer_id = $2 and contact_id = any($3::uuid[])
+           and status not in ('active','waiting_reply','paused_handoff','paused_manual')
+           and updated_at >= $4`,
+        [orgId, pointerId, contactIds, cutoffIso],
+      );
+      return new Set(rows.map((r) => r.contact_id));
     },
     async insertEnrollment(input) {
       try {
@@ -269,15 +298,18 @@ async function seedConversationAt(org: string, contactId: string, atIso: string)
 
 async function seedSilenceFlow(
   org: string,
-  opts?: { thresholdMinutes?: number; segments?: string[] },
+  opts?: { thresholdMinutes?: number; segments?: string[]; comIa?: boolean },
 ): Promise<{ pointerId: string; versionId: string }> {
-  const graph: FlowGraph = {
+  const graph = {
     nodes: [
       { id: "t1", type: "trigger", label: "Start", position: { x: 0, y: 0 }, config: {} },
+      ...(opts?.comIa
+        ? [{ id: "c1", type: "ai_classify" as const, label: "Class", position: { x: 0, y: 0 }, config: {} }]
+        : []),
       { id: "e1", type: "end", label: "Done", position: { x: 0, y: 0 }, config: { outcome: "converted" } },
     ],
     edges: [{ id: "t1-e1", source: "t1", target: "e1", priority: 0, condition: { type: "always" } }],
-  };
+  } as FlowGraph;
   const { rows: versionRows } = await pool.query<{ id: string }>(
     `insert into followup_flow_versions (organization_id, graph) values ($1, $2) returning id`,
     [org, JSON.stringify(graph)],
@@ -365,14 +397,140 @@ describe("runSilenceSweep — enrolla contato silencioso gateado, sem duplicar",
   });
 });
 
-// ---- 2. gate-out: sem agente publicado habilitando → 0 enrollments -----
+// ---- 1b. cooldown pós-conclusão (issue de produção, 2026-09-25) --------
 
-describe("runSilenceSweep — gate-out (nenhum agente publicado habilita o pointer)", () => {
-  it("mesmo contato silencioso, SEM agente publicado com followup.enabled → 0 enrollments (prova que o gate é chamado)", async () => {
+describe("runSilenceSweep — cooldown pós-conclusão (não reinscreve a cada tick do cron)", () => {
+  it("enrollment deste pointer TERMINOU há menos que threshold_minutes → NÃO reinscreve (contato continua silencioso)", async () => {
+    const org = nextOrgId();
+    await seedOrg(org);
+    const thresholdMinutes = 120;
+    const { pointerId, versionId } = await seedSilenceFlow(org, { thresholdMinutes });
+    const agentId = await seedPublishedAgentVersion(org, { enabled: true, pointerIds: [pointerId] });
+    const contactId = await seedContact(org);
+    await seedConversation(org, contactId, 200); // bem além do threshold — o gatilho de silêncio sozinho enrollaria
+
+    // Simula o enrollment que a varredura ANTERIOR já criou e concluiu — a
+    // mensagem de nudge já saiu há 3 minutos, não há 2 horas. `updated_at`
+    // gravado igual a `completed_at`, como o motor real faz (engine.ts:301-302).
+    await pool.query(
+      `insert into followup_enrollments
+         (organization_id, pointer_id, version_id, contact_id, current_node_id, status,
+          next_eval_at, agent_id, started_at, completed_at, updated_at, outcome)
+       values ($1,$2,$3,$4,'e1','completed', null, $5,
+               now() - interval '3 minutes', now() - interval '1 minute', now() - interval '1 minute',
+               'exhausted')`,
+      [org, pointerId, versionId, contactId, agentId],
+    );
+
+    const summary = await runSilenceSweep({ db: silenceSweepDb(), gateDb: pgGateDb(), clock: CLOCK });
+    expect(summary.enrolled).toBe(0);
+    expect(summary.skipped_cooldown).toBeGreaterThanOrEqual(1);
+    expect(await countEnrollments(pointerId, contactId)).toBe(1); // continua só o antigo — nenhum novo nasceu
+  });
+
+  it("mesmo cenário, mas a última tentativa TERMINOU há mais que threshold_minutes → reinscreve normalmente", async () => {
+    const org = nextOrgId();
+    await seedOrg(org);
+    const thresholdMinutes = 30;
+    const { pointerId, versionId } = await seedSilenceFlow(org, { thresholdMinutes });
+    const agentId = await seedPublishedAgentVersion(org, { enabled: true, pointerIds: [pointerId] });
+    const contactId = await seedContact(org);
+    await seedConversation(org, contactId, 90);
+
+    await pool.query(
+      `insert into followup_enrollments
+         (organization_id, pointer_id, version_id, contact_id, current_node_id, status,
+          next_eval_at, agent_id, started_at, completed_at, updated_at, outcome)
+       values ($1,$2,$3,$4,'e1','completed', null, $5,
+               now() - interval '40 minutes', now() - interval '38 minutes', now() - interval '38 minutes',
+               'exhausted')`,
+      [org, pointerId, versionId, contactId, agentId],
+    );
+
+    const summary = await runSilenceSweep({ db: silenceSweepDb(), gateDb: pgGateDb(), clock: CLOCK });
+    expect(summary.skipped_cooldown).toBe(0);
+    expect(summary.enrolled).toBe(1);
+    expect(await countEnrollments(pointerId, contactId)).toBe(2); // o antigo + o novo
+  });
+
+  it("fluxo LENTO (started_at fora da janela, mas TERMINOU agora) → ainda em cooldown pelo fim, não pelo início", async () => {
+    // Reproduz o achado da revisão: um nó `wait` do grafo aceita até 90 dias
+    // (graph-schema.ts). Se o cooldown olhasse `started_at`, este caso voltaria
+    // a reinscrever na hora — o mesmo defeito que esta PR existe para consertar.
+    const org = nextOrgId();
+    await seedOrg(org);
+    const thresholdMinutes = 120;
+    const { pointerId, versionId } = await seedSilenceFlow(org, { thresholdMinutes });
+    const agentId = await seedPublishedAgentVersion(org, { enabled: true, pointerIds: [pointerId] });
+    const contactId = await seedContact(org);
+    await seedConversation(org, contactId, 200);
+
+    await pool.query(
+      `insert into followup_enrollments
+         (organization_id, pointer_id, version_id, contact_id, current_node_id, status,
+          next_eval_at, agent_id, started_at, completed_at, updated_at, outcome)
+       values ($1,$2,$3,$4,'e1','completed', null, $5,
+               now() - interval '5 days', now() - interval '1 minute', now() - interval '1 minute',
+               'exhausted')`,
+      [org, pointerId, versionId, contactId, agentId],
+    );
+
+    const summary = await runSilenceSweep({ db: silenceSweepDb(), gateDb: pgGateDb(), clock: CLOCK });
+    expect(summary.enrolled).toBe(0);
+    expect(summary.skipped_cooldown).toBeGreaterThanOrEqual(1);
+    expect(await countEnrollments(pointerId, contactId)).toBe(1);
+  });
+
+  it("enrollment AINDA VIVO (status active) não conta como cooldown — segue sendo skipped_existing pelo índice único", async () => {
+    // Se o cooldown enxergasse status vivos, este contato contaria como
+    // `skipped_cooldown` em vez de `skipped_existing` — trocando o que os dois
+    // contadores medem sem nenhuma mudança de comportamento real.
+    const org = nextOrgId();
+    await seedOrg(org);
+    const { pointerId, versionId } = await seedSilenceFlow(org, { thresholdMinutes: 30 });
+    const agentId = await seedPublishedAgentVersion(org, { enabled: true, pointerIds: [pointerId] });
+    const contactId = await seedContact(org);
+    await seedConversation(org, contactId, 90);
+
+    await pool.query(
+      `insert into followup_enrollments
+         (organization_id, pointer_id, version_id, contact_id, current_node_id, status, next_eval_at, agent_id)
+       values ($1,$2,$3,$4,'e1','active', now(), $5)`,
+      [org, pointerId, versionId, contactId, agentId],
+    );
+
+    const summary = await runSilenceSweep({ db: silenceSweepDb(), gateDb: pgGateDb(), clock: CLOCK });
+    expect(summary.skipped_cooldown).toBe(0);
+    expect(summary.skipped_existing).toBeGreaterThanOrEqual(1);
+    expect(await countEnrollments(pointerId, contactId)).toBe(1); // nenhum enrollment novo nasceu
+  });
+});
+
+// ---- 2. gate: texto fixo sem agente enrolla; grafo de IA sem agente não -----
+
+describe("runSilenceSweep — gate do agente", () => {
+  it("contato silencioso, SEM agente, grafo só de texto → enrolla com agent_id nulo", async () => {
     const org = nextOrgId();
     await seedOrg(org);
     const { pointerId } = await seedSilenceFlow(org, { thresholdMinutes: 30 });
-    // nenhum ai_agent_versions publicado nesta org habilitando o pointer
+    const contactId = await seedContact(org);
+    await seedConversation(org, contactId, 90);
+
+    const summary = await runSilenceSweep({ db: silenceSweepDb(), gateDb: pgGateDb(), clock: CLOCK });
+    expect(summary.pointers_gated_out).toBe(0);
+    expect(summary.enrolled).toBeGreaterThanOrEqual(1);
+    expect(await countEnrollments(pointerId, contactId)).toBe(1);
+    const { rows } = await pool.query<{ agent_id: string | null }>(
+      `select agent_id from followup_enrollments where pointer_id = $1 and contact_id = $2`,
+      [pointerId, contactId],
+    );
+    expect(rows[0]!.agent_id).toBeNull();
+  });
+
+  it("contato silencioso, SEM agente, grafo que pede IA → 0 enrollments", async () => {
+    const org = nextOrgId();
+    await seedOrg(org);
+    const { pointerId } = await seedSilenceFlow(org, { thresholdMinutes: 30, comIa: true });
     const contactId = await seedContact(org);
     await seedConversation(org, contactId, 90);
 
@@ -381,10 +539,10 @@ describe("runSilenceSweep — gate-out (nenhum agente publicado habilita o point
     expect(await countEnrollments(pointerId, contactId)).toBe(0);
   });
 
-  it("agente existe mas com followup.enabled=false → gate-out também", async () => {
+  it("agente existe mas com followup.enabled=false, grafo de IA → gate-out também", async () => {
     const org = nextOrgId();
     await seedOrg(org);
-    const { pointerId } = await seedSilenceFlow(org, { thresholdMinutes: 30 });
+    const { pointerId } = await seedSilenceFlow(org, { thresholdMinutes: 30, comIa: true });
     await seedPublishedAgentVersion(org, { enabled: false, pointerIds: [pointerId] });
     const contactId = await seedContact(org);
     await seedConversation(org, contactId, 90);

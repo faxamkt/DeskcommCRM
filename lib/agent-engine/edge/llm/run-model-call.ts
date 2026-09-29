@@ -20,6 +20,7 @@ import { generateText, stepCountIs, type ModelMessage, type ToolSet } from 'ai';
 import type pg from 'pg';
 import { z } from 'zod';
 
+import { PONTO_POR_ID } from '@/lib/ai/pontos/registro';
 import { scrubMessage } from '@/lib/sentry/scrub';
 
 import type { Logger } from '../../obs/logger';
@@ -37,8 +38,14 @@ import {
   type ChaveDeOrcamento,
 } from './orcamento';
 import { costCents } from './pricing';
+import { chaveDeOrcamentoDaInstalacao } from '../../../instalacao/comportamento';
 import { createDefaultRegistry, type ProviderRegistry } from './providers';
 import { buildStablePrefix } from './stable-prefix';
+import {
+  degrauDoEnderecoProprio,
+  prazoLegivel,
+  RECUSA_A_PARTIR_DE,
+} from './prazo-do-endereco-proprio';
 
 // Call sites FORA da camada importam os tipos daqui — nunca de 'ai' direto
 // (o seam é a única porta). `tool` idem: é como o agente define ToolSet sem
@@ -81,6 +88,84 @@ export class LlmModelNotEnabledError extends Error {
   constructor(model: string) {
     super(`modelo não habilitado para a org (enabled_models): ${model}`);
   }
+}
+
+/**
+ * Endereço próprio escolhido pela ORGANIZAÇÃO + chave da INSTALAÇÃO: a chamada
+ * é recusada antes de sair byte (decisão 22-a do dono do produto).
+ *
+ * A mensagem é a instrução, numa linha só, porque é ela que chega a quem opera
+ * por três caminhos: a tela de Execuções (via `llm_calls.error_message`), o
+ * ensaio do agente (que mostra o erro na tela) e o `job_dead` da fila, que
+ * guarda a primeira linha de `last_error` no corpo do aviso.
+ *
+ * NÃO é `terminal`, e isso é escolha: `terminal` manda a fila cancelar o job
+ * sem retry, e a fila só pode fazer isso com segurança porque o orçamento tem
+ * a escolta de handoff em `runAgentTurn` — este erro não tem. Sem a escolta, o
+ * job cancelado deixaria a conversa sem resposta e sem ninguém. Como erro
+ * comum, ele segue o mesmo caminho dos irmãos de configuração
+ * (`LlmNotConfiguredError`, `LlmModelNotEnabledError`): a fila tenta de novo
+ * com espera crescente — quem corrigir a configuração nesse intervalo tem a
+ * conversa respondida — e, esgotadas as tentativas, o `job_dead` leva esta
+ * frase como motivo.
+ */
+export class LlmEnderecoExigeChaveDaEmpresaError extends Error {
+  override readonly name = 'llm_endereco_exige_chave_da_empresa';
+  constructor() {
+    super(
+      'o endereço de IA configurado para esta empresa só é usado com a chave dela, e ela não tem chave cadastrada para este provedor — a chave da instalação não é enviada a endereço escolhido pela empresa; cadastre a chave da empresa em Agente de IA › Provedores, ou tire o endereço próprio para voltar ao provedor padrão da instalação',
+    );
+  }
+}
+
+/**
+ * O título do aviso na Central. Constante exportada porque é também a chave de
+ * dedup: o aviso usa `kind='other'` sem referência (ver `recusarEndereco…`).
+ */
+export const TITULO_ENDERECO_SEM_CHAVE_DA_EMPRESA =
+  'A IA recusou usar o endereço próprio desta empresa sem a chave dela';
+
+/**
+ * O título da fase de AVISO — antes do prazo, a chamada SEGUE, e dizer
+ * "recusou" seria falso na tela de quem administra. Título diferente também
+ * separa a dedup: o aviso do prazo e a recusa de depois são dois itens, e é
+ * assim que a Central conta a história em vez de sobrescrevê-la.
+ */
+export const TITULO_ENDERECO_SEM_CHAVE_PRAZO =
+  `A IA vai deixar de usar o endereço próprio desta empresa sem a chave dela em ${prazoLegivel()}`;
+
+/** O corpo do aviso — só o HOST do endereço, nunca a URL inteira. */
+export function corpoDoAvisoDeEnderecoSemChave(d: {
+  purpose: string;
+  provider: string;
+  baseUrl: string;
+  /** `avisa` antes do prazo (a chamada seguiu), `recusa` depois dele. */
+  degrau: 'avisa' | 'recusa';
+}): string {
+  const ponto = PONTO_POR_ID.get(d.purpose)?.rotulo ?? d.purpose;
+  // Só o host: uma URL pode carregar usuário e senha (`https://u:s@host`) ou um
+  // token na query, e este corpo é lido por qualquer pessoa da equipe.
+  let destino = 'um endereço próprio';
+  try {
+    destino = `um endereço próprio (${new URL(d.baseUrl).host})`;
+  } catch {
+    // Endereço que nem é URL: o aviso segue sem o host, que é detalhe.
+  }
+  return (
+    `O ponto "${ponto}" está configurado em Agente de IA › Provedores para ${destino}, ` +
+    `mas esta empresa não tem chave de ${d.provider} cadastrada e validada. ` +
+    `A chave de IA da instalação — a que paga a conta de todas as empresas deste servidor — ` +
+    `não é enviada a um endereço escolhido por uma empresa. ` +
+    (d.degrau === 'recusa'
+      ? `A chamada foi recusada antes de sair. Enquanto isso não for corrigido, as chamadas desse ponto ` +
+        `continuam recusadas; quando o ponto faz parte do atendimento, o agente deixa de responder aos ` +
+        `clientes desta empresa. `
+      : `A chamada SEGUIU desta vez, mas isso tem prazo: a partir de ${prazoLegivel()} ela passa a ser ` +
+        `recusada, e quando o ponto faz parte do atendimento o agente deixa de responder aos clientes ` +
+        `desta empresa. Corrija antes dessa data. `) +
+    `Para resolver: cadastre a chave da empresa em Agente de IA › Provedores, ` +
+    `ou tire o endereço próprio para voltar ao provedor padrão da instalação.`
+  );
 }
 
 // Whitelist de params da org (jsonb livre no DB → só o que o seam entende passa).
@@ -128,6 +213,18 @@ export interface RunModelCallInput {
    */
   maxSteps?: number;
   /**
+   * Encerra o loop quando o predicado for verdadeiro ao fim de uma etapa (além
+   * do teto de `maxSteps`). É predicado, e não nome de tool, de propósito: o
+   * rascunho assistido para quando há resposta ACEITA, não quando o modelo
+   * chamou `send_message` — um envio vetado devolve o erro ao modelo para ele
+   * reescrever na etapa seguinte, e parar ali entregava rascunho vazio.
+   */
+  pararQuando?: () => boolean;
+  /** Teto por chamada auxiliar; nunca aumenta o limite configurado pela organização. */
+  maxOutputTokens?: number;
+  /** Cancelamento propagado pelo chamador; a falha continua registrada em llm_calls. */
+  abortSignal?: AbortSignal;
+  /**
    * Override de provider/credencial vindo da versão PUBLICADA do agente (Fase
    * 2B) — resolvido no seam, nunca no call site. Sem ele, config da org.
    */
@@ -137,6 +234,12 @@ export interface RunModelCallInput {
 export interface RunModelCallDeps {
   registry?: ProviderRegistry;
   log?: Logger;
+  /**
+   * O relógio, injetável por causa do degrau de `./prazo-do-endereco-proprio`:
+   * sem ele a virada do prazo nunca é exercitada em teste e o dia do corte vira
+   * surpresa em produção.
+   */
+  agora?: Date;
 }
 
 /**
@@ -308,8 +411,106 @@ async function aplicarOrcamento(d: {
   throw erro;
 }
 
+/**
+ * Deixa o rastro da recusa por endereço da empresa com chave da instalação e
+ * DEVOLVE o erro — quem chama o lança (`throw await …`), para a recusa ficar
+ * visível no ponto em que acontece.
+ *
+ * Três rastros, cada um para um leitor:
+ *
+ *  - **Aviso na Central**, para quem administra a empresa, com a instrução.
+ *    `kind='other'` sem referência, e não um kind próprio: kind novo exige
+ *    reconstruir o CHECK de `agent_inbox_items.kind` (migration + bloco único do
+ *    baseline), o mesmo custo que `pacing/aviso-de-janela.ts` recusou pelo mesmo
+ *    motivo. SEM referência de propósito: com `ref_kind` fora da política de
+ *    `other`, a Central mostraria "Este contexto não está disponível para
+ *    você", frase falsa aqui; sem referência ela mostra a orientação do kind. A
+ *    dedup é pelo TÍTULO aberto — uma rajada de conversas vira UM aviso.
+ *  - **Linha em `llm_calls`**, para a tela de Execuções dizer o que fazer
+ *    (`error_code='endereco_exige_chave_da_empresa'`). A tabela que explica o
+ *    silêncio não pode ficar vazia justamente numa recusa nossa.
+ *  - **Log**, para quem lê o contêiner.
+ *
+ * Nenhum dos três pode impedir a recusa: falha ao gravar vira log, e o erro
+ * devolvido é sempre o da recusa.
+ */
+async function registrarRecusaDeEnderecoSemChave(d: {
+  db: pg.Pool;
+  input: RunModelCallInput;
+  purpose: string;
+  provider: string;
+  model: string;
+  origem: string;
+  baseUrl: string;
+  /** `avisa` antes do prazo (a chamada segue), `recusa` depois dele. */
+  degrau: 'avisa' | 'recusa';
+  log?: Logger;
+}): Promise<LlmEnderecoExigeChaveDaEmpresaError | null> {
+  const erro = new LlmEnderecoExigeChaveDaEmpresaError();
+  const comum = {
+    organization_id: d.input.tenantId,
+    purpose: d.purpose,
+    provider: d.provider,
+    model: d.model,
+  };
+
+  try {
+    await d.db.query(
+      `insert into agent_inbox_items (organization_id, kind, severity, title, body)
+       select $1, 'other', 'critical', $2, $3
+       where not exists (
+         select 1 from agent_inbox_items
+         where organization_id = $1 and kind = 'other' and title = $2 and status = 'open'
+       )`,
+      [
+        d.input.tenantId,
+        d.degrau === 'recusa' ? TITULO_ENDERECO_SEM_CHAVE_DA_EMPRESA : TITULO_ENDERECO_SEM_CHAVE_PRAZO,
+        corpoDoAvisoDeEnderecoSemChave({
+          purpose: d.purpose,
+          provider: d.provider,
+          baseUrl: d.baseUrl,
+          degrau: d.degrau,
+        }),
+      ],
+    );
+  } catch (err) {
+    d.log?.warn('llm: o aviso da recusa por endereço sem chave da empresa não abriu — a recusa segue', {
+      ...comum,
+      ...normalizarErro(err),
+    });
+  }
+
+  if (d.degrau === 'avisa') {
+    // A chamada SEGUE até o prazo: gravar uma linha de FALHA em `llm_calls`
+    // para uma chamada que vai acontecer seria mentira na tela de Execuções —
+    // ela vira a linha normal da chamada, logo abaixo, como qualquer outra.
+    d.log?.warn(
+      'llm: endereço da empresa com a chave da instalação — a chamada SEGUE até o prazo',
+      { ...comum, recusa_a_partir_de: RECUSA_A_PARTIR_DE },
+    );
+    return null;
+  }
+
+  await registrarFalha(d.db, {
+    input: d.input,
+    purpose: d.purpose,
+    provider: d.provider,
+    model: d.model,
+    origem: d.origem,
+    latencyMs: 0,
+    erro,
+  }).catch(() => {
+    // Gravar a recusa não pode impedir a recusa.
+  });
+
+  d.log?.warn('llm: chamada recusada — endereço escolhido pela empresa com a chave da instalação', comum);
+  return erro;
+}
+
 export async function runModelCall(db: pg.Pool, cfg: LlmEdgeConfig, input: RunModelCallInput, deps: RunModelCallDeps = {}) {
-  const registry = deps.registry ?? createDefaultRegistry();
+  // O knob do raciocínio da DeepSeek entra pela fábrica: `deepseekThinking` só é
+  // lido pela fábrica `deepseek`, então os outros provedores não têm como mudar.
+  const registry = deps.registry ?? createDefaultRegistry({ deepseekThinking: cfg.deepseekThinking });
   const purpose = input.purpose ?? 'agent_turn';
 
   // A config da org é lida ANTES da decisão porque o resolvedor precisa dela
@@ -378,6 +579,44 @@ export async function runModelCall(db: pg.Pool, cfg: LlmEdgeConfig, input: RunMo
   }
   const { temperature, topP, topK, maxOutputTokens } = parsedParams.data;
 
+  // ═══ A CHAVE DA INSTALAÇÃO NÃO VAI PARA O ENDEREÇO DA EMPRESA ═══
+  //
+  // `decisao.baseUrl` só existe quando o ponto tem endereço próprio, e ele vem
+  // de `ai_purpose_bindings` — tabela POR ORGANIZAÇÃO, editada por quem a
+  // administra. `config.origemDaChave` diz se a chave carregada é dela ou é o
+  // `.env` que paga a conta de todas as empresas do servidor. Juntos, os dois
+  // mandariam a chave da instalação para um endereço que UMA empresa escolheu.
+  // Decisão 22-a do dono do produto: endereço próprio exige chave própria.
+  //
+  // A condição olha para o que foi DECIDIDO e CARREGADO, nunca para o rótulo
+  // `decisao.origem` — mesma regra de `precisaOutraCredencial` acima. E vem
+  // antes do teto: é recusa de configuração, e consultar gasto para uma chamada
+  // que não vai sair seria custo à toa. O mesmo corte vale no worker de mídia
+  // (`workers/media-derive-worker.ts`), pela mesma fonte.
+  //
+  // ═══ EM DOIS TEMPOS, E O SEGUNDO ENTRA SOZINHO ═══
+  //
+  // Recusar no instante da atualização obrigaria quem opera a agir ANTES de
+  // atualizar — o que, pela régua de versionamento, é major, e major só sai
+  // quando o dono do produto pede (decisão dele, 19/09/2026, doc 40). Então
+  // até `RECUSA_A_PARTIR_DE` a chamada SEGUE e o aviso na Central traz a DATA;
+  // a partir dela, a recusa entra sem ninguém precisar reabrir o assunto.
+  // A regra e o relógio injetável moram em `./prazo-do-endereco-proprio.ts`.
+  if (decisao.baseUrl && config.origemDaChave === 'chave_da_instalacao') {
+    const erroOuNulo = await registrarRecusaDeEnderecoSemChave({
+      db,
+      input,
+      purpose,
+      provider: config.provider,
+      model,
+      origem: decisao.origem,
+      baseUrl: decisao.baseUrl,
+      degrau: degrauDoEnderecoProprio(deps.agora ?? new Date()),
+      ...(deps.log ? { log: deps.log } : {}),
+    });
+    if (erroOuNulo) throw erroOuNulo;
+  }
+
   // ═══ O TETO, LOGO ANTES DE SAIR BYTE ═══
   //
   // Fica DEPOIS da resolução de modelo/provider, e não antes como o
@@ -392,7 +631,12 @@ export async function runModelCall(db: pg.Pool, cfg: LlmEdgeConfig, input: RunMo
     organizationId: input.tenantId,
     orcamentoDaConfig: config.orcamento,
     orcamentoIndisponivelPorque: config.orcamentoIndisponivelPorque,
-    chave: cfg.budgetEnforcement ?? 'on',
+    // A chave EFETIVA da instalação: a linha escrita na tela de admin vence, e
+    // o valor do `.env` (que veio na config) é o PISO. A leitura é feita AQUI,
+    // a cada chamada, porque é aqui que a decisão acontece — um snapshot no
+    // boot faria o kill switch da tela só valer depois de reiniciar o worker
+    // (issue #1034). Sem banco lido nesta vida do processo, isto é o de hoje.
+    chave: chaveDeOrcamentoDaInstalacao(cfg.budgetEnforcement ?? 'on'),
     purpose,
     provider: config.provider,
     model,
@@ -414,21 +658,33 @@ export async function runModelCall(db: pg.Pool, cfg: LlmEdgeConfig, input: RunMo
   const startedAt = Date.now();
   let result: Awaited<ReturnType<typeof generateText>>;
   try {
+    input.abortSignal?.throwIfAborted();
     // `system` aceita SystemModelMessage (com providerOptions de cache) — igual
     // em v6 e v7 (smoke prova que o cacheControl continua virando cache_control).
     result = await generateText({
       // `decisao.baseUrl` só é preenchido quando o painel apontou um endpoint
       // (gateway OpenAI-compatível, ou modelo local). Providers canônicos
       // ignoram o terceiro argumento e vão ao endpoint intrínseco.
-      model: factory(config.apiKey, model, decisao.baseUrl ?? undefined),
+      // `config.baseUrl` é o da PRÓPRIA credencial e só o provedor personalizado
+      // (#1642) tem um: o endereço nasce junto da chave, então o agente
+      // publicado nele alcança o mesmo gateway que a tela testou ao salvar.
+      model: factory(config.apiKey, model, decisao.baseUrl ?? config.baseUrl ?? undefined),
       system: prefix.system,
       messages: input.messages,
+      abortSignal: input.abortSignal,
       tools: guardServiceTools(prefix.tools),
-      stopWhen: input.maxSteps === undefined ? undefined : stepCountIs(input.maxSteps),
+      stopWhen:
+        input.maxSteps === undefined
+          ? undefined
+          : input.pararQuando === undefined
+            ? stepCountIs(input.maxSteps)
+            : [stepCountIs(input.maxSteps), input.pararQuando],
       temperature,
       topP,
       topK,
-      maxOutputTokens,
+      maxOutputTokens: input.maxOutputTokens === undefined
+        ? maxOutputTokens
+        : Math.min(maxOutputTokens ?? Infinity, input.maxOutputTokens),
     });
   } catch (err) {
     // ─── A LINHA QUE FALTAVA ────────────────────────────────────────────────
@@ -473,7 +729,10 @@ export async function runModelCall(db: pg.Pool, cfg: LlmEdgeConfig, input: RunMo
     cacheReadTokens: result.usage.inputTokenDetails.cacheReadTokens ?? 0,
     cacheWriteTokens: result.usage.inputTokenDetails.cacheWriteTokens ?? 0,
   };
-  const cost = costCents(model, usage);
+  // O TTL é o MESMO que gravou o prefixo estável acima: a gravação de cache custa
+  // 1.25× a entrada em 5m e 2× em 1h, e supor a doutrina superfaturaria 60% da
+  // parcela de cache write em quem usa o knob.
+  const cost = costCents(model, usage, cfg.cacheTtl ?? '1h');
 
   const { rows } = await db.query<{ id: string }>(
     `insert into llm_calls
@@ -573,13 +832,25 @@ export function normalizarErro(err: unknown): {
   if (err instanceof LlmBudgetExceededError) {
     return { error_code: 'orcamento_esgotado', error_message: redigirMensagemDoProvedor(bruto), http_status: null };
   }
+  // A outra recusa nossa: endereço da empresa com a chave da instalação.
+  if (err instanceof LlmEnderecoExigeChaveDaEmpresaError) {
+    return {
+      error_code: 'endereco_exige_chave_da_empresa',
+      error_message: redigirMensagemDoProvedor(bruto),
+      http_status: null,
+    };
+  }
 
   let codigo = 'erro_desconhecido';
   if (status === 401 || status === 403 || /unauthor|invalid.*api.?key|authentication|incorrect api key/i.test(bruto)) {
     codigo = 'credencial_recusada';
   } else if (status === 404 || /model.*not.*found|does not exist/i.test(bruto)) {
     codigo = 'modelo_inexistente';
-  } else if (status === 429 || /rate.?limit|quota|insufficient.*credit/i.test(bruto)) {
+  } else if (status === 429 || /rate.?limit|quota|insufficient.*credit|credit balance is too low/i.test(bruto)) {
+    // A Anthropic diz "sem crédito" com 400 ("Your credit balance is too low…"),
+    // o mesmo status de um pedido malformado — só a frase distingue. Sem ela a
+    // tela de Execuções mostrava "erro desconhecido" no caso mais fácil de
+    // resolver (recarregar). A espera pela recarga é da fila: `espera-de-saldo.ts`.
     codigo = 'limite_ou_saldo';
   } else if ((status !== null && status >= 500) || /timeout|ECONNREFUSED|fetch failed|network/i.test(bruto)) {
     codigo = 'provedor_indisponivel';
@@ -616,12 +887,14 @@ export function redigirMensagemDoProvedor(bruto: string): string {
   const semSegredo = bruto
     // Chaves de API dos provedores que este produto fala: `sk-ant-…`,
     // `sk-or-v1-…`, `sk-proj-…`, `sk-…`, e as do Google (`AIza…`).
-    .replace(/sk-[A-Za-z0-9_-]{8,}/g, '[CHAVE]')
-    .replace(/AIza[A-Za-z0-9_-]{10,}/g, '[CHAVE]')
+    .replace(/\bsk-[A-Za-z0-9_-]{8,}/g, '[CHAVE]')
+    .replace(/\bAIza[A-Za-z0-9_-]{10,}/g, '[CHAVE]')
+    // A do Jev (`apikey_<hex>_<hex>`), que não tem `sk-` e aparece solta.
+    .replace(/\bapikey_[A-Za-z0-9_]{16,}/g, '[CHAVE]')
     // O header inteiro, em qualquer caixa, com ou sem `Authorization:` na
     // frente — é assim que ele costuma aparecer ecoado num corpo de erro.
-    .replace(/[Bb]earer\s+[A-Za-z0-9._-]{8,}/g, 'Bearer [CHAVE]')
-    .replace(/(x-api-key|api[-_]?key|authorization)\s*[:=]\s*\S+/gi, '$1: [CHAVE]');
+    .replace(/\b[Bb]earer\s+[A-Za-z0-9._-]{8,}/g, 'Bearer [CHAVE]')
+    .replace(/\b(x-api-key|api[-_]?key|authorization)\b\s*[:=]\s*\S+/gi, '$1: [CHAVE]');
   return scrubMessage(semSegredo).slice(0, 500);
 }
 

@@ -157,6 +157,17 @@ export interface PontoDeIa {
    */
   fixo?: { razao: string; usa?: { provider: string; modelId: string } };
   registraEm: DestinoDeTelemetria;
+  /**
+   * O ponto sabe ser decidido pelo Jev (`lib/ai/decisao/`), que devolve decisão
+   * tipada em vez de texto. Só marque o ponto que TEM chamador do Jev:
+   * `tests/unit/pontos-de-ia-decisao-rapida.test.ts` cobra os dois lados, porque
+   * ponto marcado sem chamador é botão que não controla nada.
+   */
+  decisaoRapida?: {
+    primitiva: "score" | "choice" | "noul";
+    /** O que o Jev faz neste ponto, para quem não é engenheiro. Vai à tela. */
+    oQueOJevFaz: string;
+  };
 }
 
 export const PONTOS_DE_IA: readonly PontoDeIa[] = [
@@ -210,6 +221,16 @@ export const PONTOS_DE_IA: readonly PontoDeIa[] = [
     registraEm: "llm_calls",
   },
   {
+    id: "prospecting_agent_setup_chat",
+    rotulo: "Montar agente por conversa",
+    oQueFaz: "Conversa com o administrador e prepara uma proposta de agente para uma campanha. A criação depende da confirmação no resumo.",
+    papel: "melhorar",
+    exige: {},
+    emissor: "lib/prospecting/agent-chat.ts",
+    sintomaDeFalha: "A conversa de configuração mostra um erro e preserva o que foi escrito; nenhum agente é criado.",
+    registraEm: "llm_calls",
+  },
+  {
     id: "draft_suggestion",
     rotulo: "Sugerir resposta ao atendente",
     oQueFaz:
@@ -219,6 +240,42 @@ export const PONTOS_DE_IA: readonly PontoDeIa[] = [
     emissor: "lib/agent-engine/agent/draft-reply.ts",
     sintomaDeFalha:
       "O botão de sugerir resposta não traz nada, e o atendente escreve do zero sem saber por quê.",
+    registraEm: "llm_calls",
+  },
+  {
+    id: "proposal_assistant",
+    rotulo: "Ajustar proposta por instrução",
+    oQueFaz:
+      "Interpreta um pedido curto ('baixa 10% e tira a hospedagem') e monta as mudanças na proposta comercial, para uma pessoa revisar antes de aplicar.",
+    papel: "atender",
+    exige: { tools: true },
+    emissor: "lib/propostas/assistente.ts",
+    sintomaDeFalha:
+      "O botão de ajustar a proposta por instrução não devolve nenhuma mudança, e quem está editando precisa mexer campo por campo à mão.",
+    registraEm: "llm_calls",
+  },
+  {
+    id: "proposal_fill_from_conversation",
+    rotulo: "Preencher proposta com a conversa",
+    oQueFaz:
+      "Lê a conversa com o cliente e sugere valores para os campos que faltam preencher no documento da proposta, para uma pessoa revisar e confirmar campo por campo.",
+    papel: "atender",
+    exige: { tools: true },
+    emissor: "lib/propostas/preencher-com-conversa.ts",
+    sintomaDeFalha:
+      "O botão 'Preencher com a conversa' não sugere nada, e quem revisa preenche cada campo lendo a conversa manualmente.",
+    registraEm: "llm_calls",
+  },
+  {
+    id: "proposal_template_import",
+    rotulo: "Transformar proposta da empresa em modelo",
+    oQueFaz:
+      "Lê a proposta que a empresa já usa (PDF ou texto) e a divide em seções de modelo, trocando os dados de um cliente específico por campos preenchíveis, para uma pessoa revisar antes de salvar.",
+    papel: "atender",
+    exige: { tools: true },
+    emissor: "lib/propostas/modelos/importar.ts",
+    sintomaDeFalha:
+      "O botão de criar modelo a partir de um arquivo não devolve nada, e a pessoa monta o modelo seção por seção à mão.",
     registraEm: "llm_calls",
   },
   {
@@ -246,6 +303,11 @@ export const PONTOS_DE_IA: readonly PontoDeIa[] = [
     sintomaDeFalha:
       "A conversa cai sempre no mesmo agente, ou em nenhum — como se os roteadores que você configurou não existissem.",
     registraEm: "llm_calls",
+    decisaoRapida: {
+      primitiva: "choice",
+      oQueOJevFaz:
+        "Lê a última mensagem do cliente, sozinha, e escolhe entre as intenções do seu roteador qual agente deve atender.",
+    },
   },
   {
     id: "stage_classifier",
@@ -260,6 +322,24 @@ export const PONTOS_DE_IA: readonly PontoDeIa[] = [
     registraEm: "llm_calls",
   },
   {
+    id: "case_chat",
+    rotulo: "Conversar sobre o caso com a equipe",
+    oQueFaz:
+      "Responde às perguntas de quem vai decidir um caso: lê o caso, o que a equipe já decidiu e a " +
+      "conversa com o cliente, e explica em português. Nunca fala com o cliente nem mexe no caso.",
+    papel: "entender",
+    // `exige: {}` porque o ponto roda SEM FERRAMENTA NENHUMA: o servidor monta o
+    // contexto inteiro antes de chamar o modelo. Ferramenta de leitura
+    // alcançaria outros casos e outros contatos da organização; ferramenta de
+    // efeito faria a consulta virar ação. Sem exigência, qualquer modelo barato
+    // serve — e a tela não recusa a escolha por falta de ferramentas.
+    exige: {},
+    emissor: "lib/agent-engine/agent/conversa-do-caso.ts",
+    sintomaDeFalha:
+      "Quem vai decidir o caso pergunta e não recebe resposta — decide sem o contexto, ou larga o caso na fila.",
+    registraEm: "llm_calls",
+  },
+  {
     id: "sentiment_classify",
     rotulo: "Medir o clima da conversa",
     oQueFaz:
@@ -270,6 +350,11 @@ export const PONTOS_DE_IA: readonly PontoDeIa[] = [
     sintomaDeFalha:
       "Cliente irritado não é mais escalado para um humano, e a insatisfação só aparece quando ele já sumiu.",
     registraEm: "llm_calls",
+    decisaoRapida: {
+      primitiva: "score",
+      oQueOJevFaz:
+        "Percebe, geralmente em menos de um segundo, se o cliente está irritado — e avisa para passar a conversa a uma pessoa.",
+    },
   },
   {
     id: "followup_classify",
@@ -295,6 +380,19 @@ export const PONTOS_DE_IA: readonly PontoDeIa[] = [
     registraEm: "llm_calls",
   },
 
+  {
+    id: "flow_validate",
+    rotulo: "Validar a resposta do fluxo",
+    oQueFaz:
+      "Quando o fluxo está esperando uma resposta, lê a mensagem do cliente com o contexto da conversa e devolve SÓ o dado que deve ser salvo — ou diz que ele não respondeu.",
+    papel: "entender",
+    exige: {},
+    emissor: "lib/agent-engine/agent/flow-validate.ts",
+    sintomaDeFalha:
+      "Dado errado entra no cadastro do cliente (ex.: o modelo grava a resposta na pergunta errada) ou o cliente fica sem a pergunta seguinte.",
+    registraEm: "llm_calls",
+  },
+
   // ────────────────────────── Proteger a operação ──────────────────────────
   {
     id: "jailbreak_detect",
@@ -307,6 +405,11 @@ export const PONTOS_DE_IA: readonly PontoDeIa[] = [
     sintomaDeFalha:
       "O agente passa a aceitar instruções de estranhos e pode falar em nome da empresa coisas que você nunca autorizou.",
     registraEm: "llm_calls",
+    decisaoRapida: {
+      primitiva: "choice",
+      oQueOJevFaz:
+        "Percebe, na mensagem do cliente, quem tenta enganar o agente para ele fugir das suas regras — e soma esse sinal ao da sua IA de sempre, sem nunca apagá-lo.",
+    },
   },
   {
     id: "promise_semantic",

@@ -24,15 +24,18 @@ import {
   CONDITION_TRUE_BRANCH_ID,
   FALLBACK_BRANCH_ID,
   NO_REPLY_BRANCH_ID,
+  nodeBranches,
   type FlowEdge,
   type FlowNode,
 } from "./graph-schema";
 import {
+  FRASE_DE_OUTROS_CASOS,
   RAMOS_RESERVADOS_EM_FRASE,
   fraseDaClasse,
   fraseDaRegraNomeada,
   fraseDaRegraSemNome,
   fraseDoRamo,
+  type NomesDeValor,
 } from "./vocabulario";
 
 // ---------------------------------------------------------------------------
@@ -76,8 +79,10 @@ export type TomDoStatus = "neutral" | "success" | "warning" | "error" | "info";
 const STATUS: Record<string, { rotulo: string; tom: TomDoStatus }> = {
   active: { rotulo: "Ativo", tom: "success" },
   waiting_reply: { rotulo: "Aguardando resposta", tom: "info" },
+  dormente: { rotulo: "Aguardando a data do retorno", tom: "info" },
   paused_handoff: { rotulo: "Pausado (atendimento humano)", tom: "warning" },
   paused_manual: { rotulo: "Pausado por uma pessoa", tom: "warning" },
+  coletando: { rotulo: "Coletando respostas do roteiro", tom: "info" },
   completed: { rotulo: "Concluído", tom: "neutral" },
   cancelled: { rotulo: "Cancelado", tom: "neutral" },
   dead: { rotulo: "Parou de tentar", tom: "error" },
@@ -124,7 +129,11 @@ const TIPO_DO_NO: Record<FlowNode["type"], string> = {
   ai_classify: "Interpretação da resposta",
   match_reply: "Resposta (texto)",
   repeat: "Repetição",
+  collect: "Pergunta",
+  skill: "Skill",
   action: "Mensagem",
+  // #1540 — não é "Mensagem": é o passo que NÃO fala com o cliente.
+  internal_task: "Lembrete interno",
   end: "Fim",
 };
 
@@ -172,6 +181,13 @@ export function resumoDoNo(node: FlowNode): NoDoDossie {
         ...base,
         resumo: `repete até ${node.config.max_count} voltas conforme a resposta`,
       };
+    case "collect":
+      return {
+        ...base,
+        resumo: `pergunta "${node.config.label}" (campo ${node.config.key})`,
+      };
+    case "skill":
+      return { ...base, resumo: `puxa a skill ${node.config.skill_name}` };
     case "action":
       return {
         ...base,
@@ -182,6 +198,10 @@ export function resumoDoNo(node: FlowNode): NoDoDossie {
               ? "envia um texto fixo"
               : "envia uma mensagem de modelo pronto",
       };
+    case "internal_task": {
+      const prazo = node.config.vence_em_dias === 0 ? "hoje" : `em ${node.config.vence_em_dias} dia(s)`;
+      return { ...base, resumo: `cria a tarefa "${node.config.titulo}" para ${prazo} — sem mensagem ao cliente` };
+    }
     case "end":
       return { ...base, resumo: `encerra — ${DESFECHO[node.config.outcome] ?? node.config.outcome}` };
   }
@@ -205,9 +225,15 @@ export function resumoDoNo(node: FlowNode): NoDoDossie {
  * dossiê mostra o RÓTULO DO DESTINO ao lado da frase, e é ele que separa duas
  * opções na hora de escolher por onde pular.
  */
-export function rotuloDaAresta(edge: FlowEdge, origem?: FlowNode): string {
+export function rotuloDaAresta(edge: FlowEdge, origem?: FlowNode, nomes: NomesDeValor = {}): string {
   const c = edge.condition;
-  if (c.type === "always") return RAMOS_RESERVADOS_EM_FRASE[FALLBACK_BRANCH_ID];
+  if (c.type === "always") {
+    // Num nó com saídas específicas, o escape não é o "caminho normal": é o que
+    // sobra quando nenhuma das outras serve.
+    return origem !== undefined && nodeBranches(origem).length > 1
+      ? FRASE_DE_OUTROS_CASOS
+      : RAMOS_RESERVADOS_EM_FRASE[FALLBACK_BRANCH_ID];
+  }
   if (c.type === "cond_result") {
     return RAMOS_RESERVADOS_EM_FRASE[c.value ? CONDITION_TRUE_BRANCH_ID : CONDITION_FALSE_BRANCH_ID];
   }
@@ -221,13 +247,13 @@ export function rotuloDaAresta(edge: FlowEdge, origem?: FlowNode): string {
   // v2: reservado tem frase própria; declarado precisa do NÓ, porque é lá que a
   // identidade do ramo mora — e o molde depende do tipo do nó (classe da IA e
   // regra do negócio não se leem igual).
-  return fraseDoRamo(c.branch_id) ?? fraseDoRamoDeclarado(origem, c.branch_id);
+  return fraseDoRamo(c.branch_id) ?? fraseDoRamoDeclarado(origem, c.branch_id, nomes);
 }
 
 const RAMO_SEM_NOME = "por um caminho sem nome";
 
 /** O molde certo para o ramo que o usuário declarou, escolhido pelo tipo do nó. */
-function fraseDoRamoDeclarado(origem: FlowNode | undefined, branchId: string): string {
+function fraseDoRamoDeclarado(origem: FlowNode | undefined, branchId: string, nomes: NomesDeValor): string {
   if (!origem) return RAMO_SEM_NOME;
 
   if (origem.type === "ai_classify") {
@@ -247,7 +273,7 @@ function fraseDoRamoDeclarado(origem: FlowNode | undefined, branchId: string): s
     // extenso — `regra-2` na tela do operador é o que o vocabulário proíbe.
     return check.label
       ? fraseDaRegraNomeada(check.label)
-      : fraseDaRegraSemNome(check.field, check.op, check.value);
+      : fraseDaRegraSemNome(check.field, check.op, check.value, nomes);
   }
 
   return RAMO_SEM_NOME;
@@ -360,6 +386,28 @@ export function descreveEvento(
         ...motor,
       };
     }
+    case "action_deferred": {
+      // Adiar NÃO é falhar, e o dossiê tem de dizer isso com todas as letras:
+      // sem esta linha o operador vê o passo parado por horas e lê defeito onde
+      // há obediência à janela que ele mesmo configurou.
+      const ate = quandoLegivel(p.until, idioma);
+      return {
+        titulo: "Segurou o envio até o horário permitido",
+        detalhe: ate ? `a janela estava fechada; envia em ${ate}` : "a janela estava fechada",
+        ...motor,
+      };
+    }
+    case "held_by_return": {
+      // Como o adiamento pela janela: segurar NÃO é falhar. Sem esta linha o
+      // operador veria o fluxo parado por dias sem saber que ele está esperando
+      // o retorno que o agente combinou com o cliente.
+      const ate = quandoLegivel(p.next_eval_at, idioma);
+      return {
+        titulo: "Segurou o fluxo por causa de um retorno agendado",
+        detalhe: ate ? `volta a andar em ${ate}, um dia depois do retorno` : null,
+        ...motor,
+      };
+    }
     case "action_sent":
       return { titulo: "Mensagem enviada", detalhe: null, ...motor };
     case "ai_classified":
@@ -450,6 +498,18 @@ export function descreveEvento(
           texto(p.source) === "guardrail_autofallback"
             ? "o caso foi aberto por uma trava de segurança, não por decisão do agente"
             : "o agente abriu um caso de atendimento",
+        ...motor,
+      };
+    case "enrolled_by_lead_created":
+      return {
+        titulo: "Começou porque o negócio nasceu",
+        detalhe: "o card acabou de ser criado",
+        ...motor,
+      };
+    case "enrolled_by_inbound_after_silence":
+      return {
+        titulo: "Começou porque o cliente voltou a escrever",
+        detalhe: "depois do tempo de silêncio escolhido no gatilho deste fluxo",
         ...motor,
       };
     case "cancelled_by_case_closed":

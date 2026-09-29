@@ -19,9 +19,9 @@
  * recusa — e o operador, que escolheu de uma lista que o CRM lhe ofereceu,
  * conclui que o sistema está quebrado. Melhor mostrar menos e certo.
  */
-import type { ChannelProvider } from "./types";
+import type { ProviderDeMensagem } from "./types";
 
-export type FonteDeTemplates = "oficial" | "parceiro";
+export type FonteDeTemplates = "oficial" | "parceiro" | "graph";
 
 /**
  * Qual rota serve as definições de cada canal.
@@ -32,27 +32,32 @@ export type FonteDeTemplates = "oficial" | "parceiro";
  * canal caía na mesma rota. Capability descreve o que o CANAL faz; isto aqui é
  * uma decisão da NOSSA arquitetura de rotas, e as duas não coincidem por sorte.
  *
- * `Record<ChannelProvider, …>` de propósito: um canal novo não compila até
+ * `Record<ProviderDeMensagem, …>` de propósito: um canal DE MENSAGEM novo não
+ * compila até
  * alguém decidir de onde vêm as definições dele. Esquecer essa decisão devolve
  * lista vazia em silêncio — que foi exatamente o defeito de origem.
  */
-const FONTE: Record<ChannelProvider, FonteDeTemplates | null> = {
+const FONTE: Record<ProviderDeMensagem, FonteDeTemplates | null> = {
   // Manda texto livre a qualquer hora: não há definição a listar, e um seletor
   // ali ofereceria solução para um problema que este canal não tem.
   waha: null,
   meta_cloud: "oficial",
   zernio: "parceiro",
+  zernio_social: null,
+  // Parceiro Graph-compatível: os modelos são os da Cloud API, servidos por uma
+  // rota própria (host/token do parceiro).
+  datafy: "graph",
 };
 
 /** `null` quando este canal não trabalha com definições aprovadas. */
 export function fonteDeTemplates(provider: string | null | undefined): FonteDeTemplates | null {
   if (!provider) return null;
-  return FONTE[provider as ChannelProvider] ?? null;
+  return FONTE[provider as ProviderDeMensagem] ?? null;
 }
 
 /** A rota que serve as definições desta fonte. */
 export function rotaDeTemplates(fonte: FonteDeTemplates): string {
-  return fonte === "parceiro"
-    ? "/api/v1/channels/partner/templates"
-    : "/api/v1/channels/templates";
+  if (fonte === "parceiro") return "/api/v1/channels/partner/templates";
+  if (fonte === "graph") return "/api/v1/channels/graph-partner/templates";
+  return "/api/v1/channels/templates";
 }

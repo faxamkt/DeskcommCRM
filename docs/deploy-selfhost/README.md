@@ -31,6 +31,14 @@ Edite o `.env` e preencha (mínimo):
 
 - **Supabase** (Settings → API do seu projeto): `NEXT_PUBLIC_SUPABASE_URL`,
   `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`
+  > Opcional: `SUPABASE_SERVER_URL`. Só quando o seu Supabase roda **na mesma
+  > rede** do app (Kong, self-host) — preencha com o endereço interno
+  > (ex.: `http://kong:8000`) e as requisições do **servidor** passam a usar
+  > esse caminho curto, que não precisa sair para a internet. O endereço interno
+  > não substitui a pública: o navegador continua falando com ela (Auth, Realtime
+  > e Storage), e é dela que saem os links que o app entrega — mídia, avatar,
+  > PDF da LGPD e o redirect do login com Google. Vazia, tudo funciona como
+  > antes.
 - **Banco direto** (Settings → Database → connection string): `SUPABASE_DB_URL`
   > É a conexão do **app**. Quem mexe no **schema** — `create extension`, o
   > `baseline.sql`, a promoção do dono, o `pg_dump` do backup — pode ser outra:
@@ -114,9 +122,9 @@ grep -nE '(psql|pg_dump) "' hostgator-setup-kit/*.sh
 
 Duas consequências que valem saber antes de escolher onde declarar:
 
-- O `docker-compose.prod.yml` entrega o `.env` inteiro ao `app` e ao `worker`
-  (`env_file: .env`). Declarar `SUPABASE_DB_ADMIN_URL` ali a expõe aos
-  contêineres. Para não expor, passe-a só no comando:
+- O `docker-compose.prod.yml` entrega o `.env` inteiro ao `app`, ao `worker`
+  e, com telefonia, ao `voice-agent` (`env_file: .env`), e todo serviço que
+  recebe o `.env` a neutraliza no `environment:` — declará-la ali não a expõe. Para não deixá-la no arquivo, passe-a só no comando:
   `SUPABASE_DB_ADMIN_URL='...' bash hostgator-setup-kit/install.sh`.
 - Em compensação, o `update.sh` roda **sozinho** (cron do `agent.sh`) e é ele
   que entrega migration nova ao clone. Sem a chave no `.env`, cada atualização
@@ -163,7 +171,13 @@ sem quebrar nada.
 **O caminho manual:** no Dashboard →
 
 1. **Authentication → Sign In / Up**: habilite *Allow new users to sign up* e
-   mantenha *Confirm email* ligado.
+   mantenha *Confirm email* ligado. **Exceção:** com a instalação em
+   "Cadastro apenas por convite" (`/admin/cadastro`), **desligue** *Allow new
+   users to sign up*. Ligado, qualquer um cria conta direto no Supabase com a
+   chave pública que vai ao navegador, passando por fora do CRM (#1653). O
+   convite continua funcionando: com o cadastro público fechado, o app cria a
+   conta do convidado pela admin API, no servidor. Voltou para "aberto" ou
+   "com aprovação"? Ligue de novo, senão o cadastro pela tela falha.
 2. **Authentication → URL Configuration**: `Site URL = https://SEU_DOMINIO` e
    adicione `https://SEU_DOMINIO/auth/confirm` em *Redirect URLs*.
 3. **Authentication → Email Templates**: troque o link dos templates
@@ -193,25 +207,45 @@ sem quebrar nada.
    `smtp_host: null`).
 
 **GoTrue self-hosted:** equivalente por env:
-`GOTRUE_DISABLE_SIGNUP=false`, `GOTRUE_MAILER_AUTOCONFIRM=false`,
+`GOTRUE_DISABLE_SIGNUP=false` (`true` em "só convite", pela mesma razão do
+passo 1; no Supabase self-hosted oficial a chave do `.env` é `DISABLE_SIGNUP`.
+No kit de servidor único, o `update.sh` grava essa chave sozinho a partir do
+modo da instalação. A troca feita em `/admin/cadastro` só chega ao Supabase na
+próxima atualização, nos dois sentidos),
+`GOTRUE_MAILER_AUTOCONFIRM=false`,
 `GOTRUE_SITE_URL=https://SEU_DOMINIO`,
 `GOTRUE_URI_ALLOW_LIST=https://SEU_DOMINIO/auth/confirm`,
 `GOTRUE_SMTP_{HOST,PORT,USER,PASS}` e
-`GOTRUE_MAILER_TEMPLATES_{CONFIRMATION,RECOVERY}` apontando para os templates
-de `supabase/templates/` (mesmo link `token_hash` acima).
-
-⚠️ **Não aponte para os arquivos do repositório direto.** Eles são MODELOS: o
-nome da marca e a cor do botão são `__APP_NAME__` / `__ACCENT__`, e o cliente
-receberia isso literalmente. Renderize antes e aponte para o resultado:
+`GOTRUE_MAILER_TEMPLATES_{CONFIRMATION,RECOVERY}` apontando para as **rotas do
+próprio app**:
 
 ```bash
-bash hostgator-setup-kit/marca-emails.sh --render-em /opt/deskcomm/emails
-# GOTRUE_MAILER_TEMPLATES_CONFIRMATION=/opt/deskcomm/emails/confirmation.html
-# GOTRUE_MAILER_TEMPLATES_RECOVERY=/opt/deskcomm/emails/recovery.html
+GOTRUE_MAILER_TEMPLATES_CONFIRMATION=https://SEU_DOMINIO/email-templates/confirmation
+GOTRUE_MAILER_TEMPLATES_RECOVERY=https://SEU_DOMINIO/email-templates/recovery
+GOTRUE_MAILER_SUBJECTS_CONFIRMATION="Confirme seu e-mail · SUA MARCA"
+GOTRUE_MAILER_SUBJECTS_RECOVERY="Redefinir sua senha · SUA MARCA"
 ```
 
-Num Supabase próprio não existe Management API, então este é o único caminho —
-e é preciso repetir o comando quando a marca mudar.
+O app serve o modelo já com a marca resolvida **do banco** — então trocar nome,
+cor ou logo em **Configurações › Marca** chega ao e-mail sozinho, em até 10
+minutos (`GOTRUE_MAILER_TEMPLATE_MAX_AGE`), sem reiniciar nada e sem rodar
+script.
+
+> ⚠️ **Tem de ser URL `http(s)`. Caminho de arquivo NÃO funciona — e falha
+> calado.** O GoTrue cola o que não começa com `http` no fim do `SITE_URL` e faz
+> um GET (`supabase/auth` v2.196.0,
+> `internal/mailer/templatemailer/template.go:456`). Apontar para
+> `/opt/.../confirmation.html` faz ele buscar
+> `https://SEU_DOMINIO/opt/.../confirmation.html`, receber o HTML da tela de
+> login e **mandar isso para a caixa de entrada do cliente**. Medido em
+> 2026-09-09 numa instalação real: o Gmail marcou como phishing.
+>
+> Esta seção mandava exatamente isso até 2026-09-10. Se você seguiu a versão
+> antiga, troque as duas variáveis pelas URLs acima.
+
+`bash hostgator-setup-kit/marca-emails.sh --render-em <dir>` continua existindo
+para **inspecionar** o HTML antes, ou para quem prefere servir os moldes por
+conta própria — num caminho HTTP seu, nunca como caminho de arquivo.
 
 ## 4. Conectar o WhatsApp
 

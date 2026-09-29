@@ -21,7 +21,9 @@
 import { normalizarErro } from "@/lib/agent-engine/edge/llm/run-model-call";
 import {
   cabecalhosDeAtribuicaoOpenRouter,
+  DEEPSEEK_ENDPOINT,
   OPENROUTER_ENDPOINT,
+  REQUESTY_ENDPOINT,
 } from "@/lib/agent-engine/edge/llm/providers";
 
 export type ResultadoDaProva =
@@ -63,10 +65,18 @@ export function montarRequisicaoDeProva(
         body: { model: modelo, max_tokens: 1, messages: msg },
       };
     case "openai":
+      // `max_tokens` foi descontinuado pela OpenAI: os modelos de raciocínio
+      // (o1/o3, a família gpt-5) RECUSAM esse campo — "Unsupported parameter:
+      // 'max_tokens' is not supported with this model. Use
+      // 'max_completion_tokens' instead." — e é exatamente o modelo padrão
+      // curado para este provedor (`ai_models.is_default_for_provider`) que
+      // cai nessa família. `max_completion_tokens` é aceito em toda a família
+      // de chat completions, raciocínio ou não, então não há motivo para
+      // ramificar por modelo aqui.
       return {
         url: "https://api.openai.com/v1/chat/completions",
         headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
-        body: { model: modelo, max_tokens: 1, messages: msg },
+        body: { model: modelo, max_completion_tokens: 1, messages: msg },
       };
     case "openrouter":
       return {
@@ -82,6 +92,37 @@ export function montarRequisicaoDeProva(
           ...cabecalhosDeAtribuicaoOpenRouter(),
         },
         body: { model: modelo, max_tokens: 1, messages: msg },
+      };
+    case "deepseek":
+      // OpenAI-compatível. `max_tokens: 1` atravessa a cobrança; o corpo é uma
+      // GERAÇÃO, não a listagem `GET /models` (que o validador de chave já usa).
+      return {
+        url: `${baseUrl ?? DEEPSEEK_ENDPOINT}/chat/completions`,
+        headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
+        body: { model: modelo, max_tokens: 1, messages: msg },
+      };
+    case "requesty":
+      // OpenAI-compatível. `max_tokens: 16` e não 1: os modelos da OpenAI
+      // atrás do roteador recusam `max_tokens` abaixo de 16 (400, medido), e o
+      // modelo mais barato do catálogo da Requesty é justamente da OpenAI.
+      return {
+        url: `${baseUrl ?? REQUESTY_ENDPOINT}/chat/completions`,
+        headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
+        body: { model: modelo, max_tokens: 16, messages: msg },
+      };
+    // Provedor personalizado (#1642): a instalação não coleta o endereço no
+    // install.sh, então sem `baseUrl` não há para onde provar — `null` é a
+    // leitura honesta de "não sei testar isto aqui", e não um ok por omissão
+    // (fail-closed, a mesma régua do `default` abaixo).
+    case "custom":
+      if (!baseUrl) return null;
+      return {
+        url: `${baseUrl.replace(/\/+$/, "")}/chat/completions`,
+        headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
+        // `max_tokens: 16` e não 1: modelos da OpenAI atrás de um gateway
+        // recusam menos que 16 (medido na Requesty), e este é um gateway
+        // qualquer — o custo de 16 tokens é irrelevante e o risco, nenhum.
+        body: { model: modelo, max_tokens: 16, messages: msg },
       };
     case "google":
       return {
@@ -101,9 +142,16 @@ export function montarRequisicaoDeProva(
   }
 }
 
+/** A frase que o provedor devolve ao gastar o único token da prova: um modelo de
+ * raciocínio gasta-o pensando. É a prova DANDO CERTO — chave recusada é 401 e
+ * modelo inexistente é 404, então este 400 prova a cobrança atravessada. */
+export const LIMITE_DE_SAIDA_ATINGIDO = "max_tokens or model output limit was reached";
+
 /** Traduz a resposta HTTP no mesmo vocabulário de erro do runtime. */
 export function classificarResposta(status: number, corpo: string): ResultadoDaProva {
   if (status >= 200 && status < 300) return { ok: true };
+  // Ver `LIMITE_DE_SAIDA_ATINGIDO`: este 400 é a prova passando, não a chave falhando.
+  if (status === 400 && corpo.toLowerCase().includes(LIMITE_DE_SAIDA_ATINGIDO)) return { ok: true };
   // `normalizarErro` lê `status` do objeto — é a régua canônica, compartilhada
   // com a tela de Execuções, e ela também redige a mensagem do provedor (que
   // pode ecoar header de autorização em endpoint próprio).

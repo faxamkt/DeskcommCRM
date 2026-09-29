@@ -36,6 +36,8 @@ services:
     pull_policy: ${APP_PULL_POLICY:-always}
     restart: unless-stopped
     env_file: .env
+    environment:
+      SUPABASE_DB_ADMIN_URL: ""
     depends_on:
       srh:
         condition: service_started
@@ -99,6 +101,7 @@ services:
     environment:
       # dentro da rede do compose, o WAHA é o serviço 'waha' na porta interna 3000
       WAHA_API_BASE_URL: http://waha:3000
+      SUPABASE_DB_ADMIN_URL: ""
     networks:
       - internal
     healthcheck:
@@ -202,7 +205,8 @@ services:
 
   scheduler:
     # Cron sem docker.sock: crond interno batendo curl na rede interna.
-    # Resolução de 1 min (= paridade com os crons da Vercel).
+    # Resolução de 1 min — o menor passo que o crond tem, e o piso de latência
+    # de tudo que depende de cron (a lista tem rotas de minuto em minuto).
     #
     # A lista de crons mora em docker/scheduler/entrypoint.sh, não mais aqui. O
     # `command:` inline instalava curl e tzdata (`apk add`) a CADA start — num
@@ -221,6 +225,180 @@ services:
     environment:
       TZ: UTC
       INTERNAL_SECRET: ${INTERNAL_SECRET}
+    logging: *default-logging
+    networks: [internal]
+
+  # ── Chamada de voz WhatsApp (spec 18) — DESLIGADA POR PADRÃO ──────────────
+  #
+  # ═══ POR QUE ELA VIVE NUM PROFILE ═══
+  #
+  # A chamada de voz vincula um SEGUNDO APARELHO ao mesmo número que já atende,
+  # por um caminho que não é o oficial: o risco é a CONTA ser bloqueada. Serviço
+  # que sobe em toda instalação transforma esse risco em padrão — e um contêiner
+  # a mais custa RAM numa VPS onde o WAHA já registrou 893 MiB de pico.
+  #
+  # `profiles:` é o mesmo mecanismo com que `docker-compose.traefik.yml` desliga
+  # o Caddy: sem o profile ativo, o compose NÃO cria o contêiner. Ligar é uma
+  # linha no .env — `COMPOSE_PROFILES=voz` — e nada mais.
+  #
+  # ⚠️ DUAS ARMADILHAS MEDIDAS, as duas do próprio Compose:
+  #
+  #   1. Nomear o serviço explicitamente (`docker compose up -d wacalls`) ATIVA
+  #      o profile e sobe o contêiner mesmo com COMPOSE_PROFILES vazio. É por
+  #      isso que o update.sh checa antes de recriar o caddy, e vale igual aqui.
+  #   2. `app` e `worker` NÃO podem ganhar `depends_on: wacalls`. Dependência
+  #      em serviço de profile inativo não sobe — o CRM inteiro deixaria de
+  #      subir em toda instalação que não usa a feature.
+  #
+  # ═══ POR QUE A IMAGEM É DO UPSTREAM, PINADA POR DIGEST ═══
+  #
+  # WaCalls (github.com/JotaDev66/WaCalls, MIT) é peça UPSTREAM, e a doutrina
+  # (docs/doctrine/packaging.md) é explícita: peça upstream se REFERENCIA, nunca
+  # se republica — "a regra vale para todas, não só a licenciada, porque a
+  # exceção é o que apaga a regra". Construir e publicar `deskcomm-wacalls`
+  # seria republicar.
+  #
+  # O digest é o pin mais forte que existe e o único disponível aqui: `:latest`
+  # e `:latest-pure` NÃO existem neste registry (404 medido em 2026-09-08); as
+  # tags publicadas são `develop` e `sha-*`. Ele resolve para
+  # `sha-d16a076`/`develop`, index OCI multi-arch (linux/amd64 + linux/arm64).
+  #
+  # `pull_policy: missing` porque o digest é imutável: com `always`, um GHCR
+  # fora do ar impediria o contêiner de subir mesmo com a imagem já no disco.
+  #
+  # ═══ SEM `ports:` — E ISSO É VIGIADO ═══
+  #
+  # A API do WaCalls fica só na rede interna, alcançável pelo app e pelo worker.
+  # `tests/unit/portas-do-compose.test.ts` reprova quem publicar porta aqui.
+  wacalls:
+    profiles: ["voz"]
+    mem_limit: 256m
+    image: ${WACALLS_IMAGE:-ghcr.io/jotadev66/wacalls@sha256:9ff52ef9455cf42125a911c38bb8c855f0cc205516cada2054e5c05546909022}
+    pull_policy: ${WACALLS_PULL_POLICY:-missing}
+    restart: unless-stopped
+    environment:
+      # O serviço NÃO SOBE sem estes dois — é o upstream que exige, e é o que
+      # substitui o build anterior, cujo README dizia "the API has no
+      # authentication ... run it only on a trusted LAN".
+      WACALLS_ADMIN_USER: ${WACALLS_ADMIN_USER:-}
+      WACALLS_ADMIN_PASSWORD: ${WACALLS_ADMIN_PASSWORD:-}
+      # Bearer da automação. Sem ele a API só aceita o cookie de login, que um
+      # processo server-to-server não tem: o app não conseguiria falar nada.
+      WACALLS_API_TOKEN: ${WACALLS_API_TOKEN:-}
+      # Vazio = same-origin. Nossa UI não fala com o WaCalls direto do browser —
+      # tudo passa pelas rotas /api/v1/voice/*, então não há origem a liberar.
+      WACALLS_CORS_ORIGINS: ${WACALLS_CORS_ORIGINS:-}
+      WACALLS_TRUSTED_PROXIES: ${WACALLS_TRUSTED_PROXIES:-}
+      WACALLS_PUBLIC_IP: ${WACALLS_PUBLIC_IP:-}
+      # A porta que o áudio usa, e ela precisa ser FIXA. Sem esta variável o
+      # upstream não monta o mux de UDP e cai em portas efêmeras aleatórias —
+      # impossíveis de publicar aqui, e o áudio nunca sai da máquina.
+      WACALLS_WEBRTC_UDP_PORT: ${WACALLS_WEBRTC_UDP_PORT:-7881}
+    ports:
+      # A ÚNICA porta publicada por um serviço nosso que não é o proxy, e ela é
+      # UDP. Não é exceção sem razão: o áudio do WebRTC não fala HTTP, então não
+      # há proxy que o carregue — o Caddy é L7 e não repassa UDP.
+      #
+      # host == contêiner de PROPÓSITO. O número entra no candidato SDP que o
+      # navegador recebe; um remap (7881:7882) faria o navegador mandar mídia
+      # para uma porta que o host não escuta, e a ligação ficaria muda com tudo
+      # "certo" nos logs.
+      #
+      # NUNCA TCP: a API HTTP do serviço continua só na rede interna, alcançável
+      # apenas pelo app e pelo worker. Publicar TCP aqui exporia a interface de
+      # administração dele à internet.
+      - "${WACALLS_WEBRTC_UDP_PORT:-7881}:${WACALLS_WEBRTC_UDP_PORT:-7881}/udp"
+    volumes:
+      # wacalls.db guarda a credencial de sessão do WhatsApp — mesmo padrão do
+      # waha-data. Apagar o volume desvincula todos os aparelhos.
+      - wacalls-data:/data
+    logging: *default-logging
+    networks: [internal]
+
+  # ═══ TELEFONIA POR SIP (#677) — MÓDULO OPCIONAL, DESLIGADO POR PADRÃO ═══
+  #
+  # Decisão do dono (doc 27 da triagem): a telefonia por SIP entra como módulo
+  # opcional do compose, no molde do `wacalls`. Os dois serviços abaixo só
+  # existem com `telefonia` em COMPOSE_PROFILES no .env — sem isso o compose
+  # nem os cria, e nenhuma instalação que não pediu ganha porta aberta,
+  # contêiner ou consumo de memória.
+  #
+  # As mesmas duas regras do `wacalls` valem aqui: nomear o serviço no
+  # `up -d` ATIVA o profile; e `app`/`worker` não podem ganhar `depends_on`
+  # nestes serviços (dependência de profile inativo derruba o CRM inteiro).
+  #
+  # Para ligar: copiar asterisk/pjsip.conf.example e asterisk/ari.conf.example
+  # para os nomes sem `.example` (com as credenciais do tronco e do ARI),
+  # pôr `telefonia` em COMPOSE_PROFILES e subir.
+  #
+  # ═══ POR QUE O ASTERISK É PINADO POR DIGEST ═══
+  #
+  # Asterisk é peça UPSTREAM — se referencia, nunca se republica
+  # (docs/doctrine/packaging.md). E neste registry nenhuma tag é imutável: a
+  # `20-alpine` e até as tags de versão (`20.20.1-alpine`) são reconstruídas
+  # a cada build do mantenedor (medido em 18/09/2026: a mesma `20.20.1` com
+  # digests diferentes em 19/08, 26/08, 02/09, 09/09 e 16/09). O digest abaixo
+  # é o da `20-alpine` = `20.20.1_alpine-3.24-e9d725f` (16/09), multi-arch
+  # (amd64 + arm64). `pull_policy: missing` porque o digest é imutável.
+  asterisk:
+    profiles: ["telefonia"]
+    mem_limit: 256m
+    image: ${ASTERISK_IMAGE:-andrius/asterisk@sha256:927d4c98777149c3380c4f8d0e82b1b1ba9e7b38528f86c1e1593d5a25032f27}
+    pull_policy: ${ASTERISK_PULL_POLICY:-missing}
+    restart: unless-stopped
+    ports:
+      # Só UDP, e pelo mesmo motivo do `wacalls`: sinalização SIP e mídia RTP
+      # não falam HTTP, não há proxy L7 que as carregue, e o tronco do
+      # provedor precisa alcançá-las de fora.
+      #
+      # NUNCA TCP: a ARI (REST + WebSocket, 8088) é o controle total das
+      # chamadas e fica só na rede interna, alcançável apenas pelo
+      # `voice-agent`. Publicá-la entregaria à internet quem liga para quem.
+      - "5060:5060/udp"
+      # Faixa de RTP casada com asterisk/rtp.conf — mudar uma sem a outra deixa
+      # a ligação muda com tudo "conectado" nos logs.
+      - "10000-10200:10000-10200/udp"
+    volumes:
+      - ./asterisk/pjsip.conf:/etc/asterisk/pjsip.conf:ro
+      - ./asterisk/extensions.conf:/etc/asterisk/extensions.conf:ro
+      - ./asterisk/ari.conf:/etc/asterisk/ari.conf:ro
+      - ./asterisk/http.conf:/etc/asterisk/http.conf:ro
+      - ./asterisk/rtp.conf:/etc/asterisk/rtp.conf:ro
+      - asterisk-data:/var/lib/asterisk
+      - asterisk-logs:/var/log/asterisk
+    healthcheck:
+      test: ["CMD", "asterisk", "-rx", "core show uptime"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    logging: *default-logging
+    networks: [internal]
+
+  # O runtime de voz é NOSSO: imagem publicada pelo CI (publish-image.yml),
+  # nunca build-only (doutrina de packaging, invariante 1). `build:` fica ao
+  # lado só como escape.
+  voice-agent:
+    profiles: ["telefonia"]
+    mem_limit: 512m
+    image: ${VOICE_AGENT_IMAGE:-ghcr.io/melgarafael/deskcomm-voice-agent:stable}
+    pull_policy: ${VOICE_AGENT_PULL_POLICY:-always}
+    build:
+      context: .
+      dockerfile: Dockerfile.voice-agent
+    restart: unless-stopped
+    depends_on:
+      asterisk:
+        condition: service_healthy
+    # env_file completo, como o `worker`: lib/env.ts valida todas as variáveis
+    # da aplicação no import, não só as de voz.
+    env_file: .env
+    environment:
+      ARI_URL: "http://asterisk:8088"
+      ARI_WS_URL: "ws://asterisk:8088/ari/events"
+      ARI_APP: "voice-agent"
+      # Como no app e no worker: a conexão do dono do banco fica no .env só
+      # para o kit no host (update.sh do cron); nenhum código de workers/ a lê.
+      SUPABASE_DB_ADMIN_URL: ""
     logging: *default-logging
     networks: [internal]
 
@@ -246,6 +424,9 @@ services:
 volumes:
   waha-data:
   waha-media:
+  wacalls-data:
+  asterisk-data:
+  asterisk-logs:
   caddy-data:
   caddy-config:
 

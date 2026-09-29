@@ -16,6 +16,7 @@
 import { createHash } from "node:crypto";
 
 import type { Actor } from "@/lib/api/handlers/types";
+import { registrarFalhaDeToken, tokenFailureLimited } from "@/lib/auth/rate-limit";
 import type { Role } from "@/lib/auth/types";
 import { ROLE_RANK } from "@/lib/auth/types";
 import { createAdminClient } from "@/lib/supabase/admin";
@@ -56,7 +57,12 @@ function scopesRole(scopes: string[]): Role {
   return "agent";
 }
 
-function deriveActor(scopes: string[], tokenId: string): Actor {
+/**
+ * Exportada para teste: é a função que decide se quem chamou é uma pessoa, um
+ * agente ou uma integração — e essa decisão vira coluna com FK e vira gate de
+ * canal. Uma regressão aqui não aparece como erro de tipo em lugar nenhum.
+ */
+export function deriveActor(scopes: string[], tokenId: string): Actor {
   const isAiAgent = scopes.includes("actor:ai_agent");
   const role = scopesRole(scopes);
   if (isAiAgent) {
@@ -64,7 +70,11 @@ function deriveActor(scopes: string[], tokenId: string): Actor {
     const runId = runScope ? runScope.slice("agent_run:".length) : tokenId;
     return { type: "ai_agent", id: runId, role, api_token_id: tokenId };
   }
-  return { type: "user", id: tokenId, role };
+  // NÃO é `"user"`: um token de servidor é uma integração, e `actor.id` aqui é o
+  // id do TOKEN, não de alguém em `auth.users`. Ver o comentário da variante
+  // `api_token` em `lib/api/handlers/types.ts` — disfarçá-lo de pessoa quebrava
+  // toda FK de `…_by_user_id` e furava o gate de `pre_go_live`.
+  return { type: "api_token", id: tokenId, role };
 }
 
 export function extractBearer(authHeader: string | null): string | null {
@@ -89,17 +99,20 @@ export interface ResolvedApiToken {
   id: string;
   organizationId: string;
   scopes: string[];
-  /** `api_tokens.created_by` — quem provisionou o token (dono do tenant, no caso Clinicfx). */
-  createdBy: string | null;
+  /** `api_tokens.created_by` — quem provisionou o token. `uuid not null` no schema. */
+  createdBy: string;
 }
 
 /**
  * Núcleo de validação de um bearer `dsk_...`: hash SHA256 → lookup em
  * `api_tokens` → checagem de `revoked_at`/`expires_at`. Extraído de
- * `validateBearerToken` pra ser reusado por qualquer consumidor de
- * `api_tokens` que não seja o MCP — hoje `lib/tenant-auth.ts` (rotas
- * `/api/v1/crm/*` da integração Clinicfx). Efeito colateral idêntico ao de
- * antes: atualiza `last_used_at` fire-and-forget.
+ * `validateBearerToken` para ser reusado por qualquer consumidor de
+ * `api_tokens` que não seja o MCP, SEM herdar a semântica de erro de outro
+ * protocolo: quem chama aqui recebe `ApiTokenError` com um `reason` neutro e
+ * decide sozinho o que isso vira na resposta dele.
+ *
+ * Efeito colateral idêntico ao de antes: atualiza `last_used_at`
+ * fire-and-forget, depois de todas as validações.
  */
 export async function resolveApiToken(plaintext: string): Promise<ResolvedApiToken> {
   if (!plaintext.startsWith("dsk_")) {
@@ -141,16 +154,34 @@ export async function resolveApiToken(plaintext: string): Promise<ResolvedApiTok
     id: data.id,
     organizationId: data.organization_id,
     scopes: parseScopes(data.scopes),
-    createdBy: (data as { created_by: string | null }).created_by,
+    createdBy: data.created_by,
   };
 }
+
+/**
+ * Mensagem do teto de falhas. Escrita para quem lê a resposta — quase sempre um
+ * modelo: o texto é o único sinal útil depois do bloqueio. Nada de contador,
+ * nada de "quantas faltam": a resposta não diz se o token existe nem quanto
+ * resta da janela.
+ */
+const TETO_DE_TOKEN_MSG =
+  "Too many failed token attempts. Wait a few minutes before retrying and send a valid `dsk_` API token — if yours was revoked or expired, issue a new one.";
 
 export async function validateBearerToken(
   authHeader: string | null,
 ): Promise<McpAuthResult> {
   const plaintext = extractBearer(authHeader);
   if (!plaintext) {
+    // Cabeçalho torto é o primeiro palpite de quem varre: conta antes de sair.
+    await registrarFalhaDeToken(null);
     throw new McpAuthError(-32001, 401, "Missing or malformed Authorization header.");
+  }
+
+  // O teto vem ANTES de resolver o token: é esta linha que tira o custo zero da
+  // tentativa — sem ela cada `dsk_` chutado custa um SELECT em `api_tokens` que
+  // ninguém conta, e varrer tokens sai de graça (issue #1447).
+  if (await tokenFailureLimited(plaintext)) {
+    throw new McpAuthError(-32004, 429, TETO_DE_TOKEN_MSG);
   }
 
   let resolved: ResolvedApiToken;
@@ -158,6 +189,14 @@ export async function validateBearerToken(
     resolved = await resolveApiToken(plaintext);
   } catch (err) {
     if (err instanceof ApiTokenError) {
+      if (err.reason !== "lookup_failed") {
+        // Chute (malformado/desconhecido) debita o balde por ORIGEM; token real
+        // e morto (revogado/expirado) debita só o do valor apresentado — ver
+        // `registrarFalhaDeToken`. `lookup_failed` é falha NOSSA: não debita.
+        await registrarFalhaDeToken(plaintext, {
+          contaNoIp: err.reason === "malformed" || err.reason === "not_found",
+        });
+      }
       throw new McpAuthError(
         err.reason === "lookup_failed" ? -32603 : -32001,
         err.reason === "lookup_failed" ? 500 : 401,

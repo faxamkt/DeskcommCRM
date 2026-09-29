@@ -11,6 +11,7 @@ import {
   RETORNO_MIN_AHEAD_MS_PADRAO,
   RETORNO_STAGGER_WINDOW_MS_PADRAO,
 } from '@/lib/followup/janela';
+import { esforcoDeRaciocinioOpenAI } from '@/lib/agent-engine/edge/llm/providers';
 
 const envSchema = z.object({
   // Postgres do Supabase (connection string — Settings → Database). O motor usa
@@ -19,6 +20,20 @@ const envSchema = z.object({
   // Supabase API — os handlers do app (sendMessageHandler) exigem o client
   // service-role. Mesmos valores do .env.local do app.
   NEXT_PUBLIC_SUPABASE_URL: z.string().url(),
+  // Endereço do Supabase PARA O WORKER, e só para ele (issue #1082). Vazio =
+  // vale a pública acima, que é o estado de toda instalação existente. Quem
+  // resolve a precedência é `urlDoSupabaseNoServidor`
+  // (lib/supabase/url-do-servidor.ts) — o mesmo módulo do app, para que os dois
+  // runtimes não possam divergir sobre qual vale. Este schema NÃO importa o
+  // módulo de propósito: ele é puro justamente para não arrastar nada do app
+  // para o boot do worker.
+  //
+  // `z.string()` e NÃO `.url()`: `lib/agent-engine/env.ts` LANÇA no boot quando o
+  // schema recusa, e um espaço sobrando no `.env` derrubaria o worker inteiro com
+  // um erro que não diz o que fazer. O mesmo motivo de `AI_BUDGET_ENFORCEMENT`
+  // (ver o comentário longo daquela chave): valor irreconhecível degrada com
+  // aviso, no resolvedor.
+  SUPABASE_SERVER_URL: z.string().optional(),
   SUPABASE_SERVICE_ROLE_KEY: z.string().min(1),
   // Chave LLM de plataforma (fallback quando a org não tem BYOK em
   // ai_provider_credentials). Opcional no boot: sem ela e sem BYOK, o turno
@@ -80,6 +95,12 @@ const envSchema = z.object({
   WATCHDOG_REDRIVE_MIN_AGE_MS: z.coerce.number().int().positive().default(30_000),
   WATCHDOG_REDRIVE_BATCH_SIZE: z.coerce.number().int().positive().default(10),
   WATCHDOG_REDRIVE_SPACING_MS: z.coerce.number().int().positive().default(4_000),
+  // Ponte de eventos WaCalls (spec 18) — chamada de voz, opt-in por org. Sem
+  // WACALLS_API_BASE_URL a ponte fica OFF (warn), mesmo princípio do watchdog
+  // WAHA acima.
+  WACALLS_API_BASE_URL: z.string().url().optional(),
+  WACALLS_API_TOKEN: z.string().trim().min(1).optional(),
+  WACALLS_BRIDGE_MAX_BACKOFF_MS: z.coerce.number().int().positive().default(30_000),
   // Dono ÚNICO dos eventos ai_agent.dispatch_requested (mesma chave do app):
   // 'engine' (default) = o drain deste worker consome; 'native' = o dispatcher
   // EPIC-13 consome e o drain daqui NÃO liga. Nunca os dois.
@@ -135,6 +156,34 @@ const envSchema = z.object({
   FOLLOWUP_MAX_AHEAD_MS: z.coerce.number().int().positive().default(RETORNO_MAX_AHEAD_MS_PADRAO),
   // TTL do prefixo estável de prompt cache (doutrina: 1h).
   LLM_CACHE_TTL: z.enum(['5m', '1h']).default('1h'),
+  // Raciocínio (thinking) da DeepSeek. O provedor LIGA por default, e o token
+  // de raciocínio entra na conta como SAÍDA — medido em produção: o turno do
+  // agente gastou ~8× a saída do OpenAI e +22 s de latência, o que anulou o
+  // desconto de preço. 'provider' (default) preserva o default do provedor;
+  // 'disabled' injeta o desligamento no corpo das chamadas — e SÓ nas da
+  // DeepSeek (a fábrica é dela; ver providers.ts).
+  DEEPSEEK_THINKING: z.enum(['provider', 'disabled']).default('provider'),
+  // Esforço de raciocínio das chamadas diretas à OpenAI (só modelos o*, gpt-5*,
+  // gpt-6*). Opcional; validado AQUI, pela mesma função que o lê em runtime, para
+  // um erro de grafia derrubar o boot com o nome da variável — e não cada turno
+  // do agente, que é onde `createDefaultRegistry` o lê.
+  OPENAI_REASONING_EFFORT: z
+    .string()
+    .optional()
+    .refine(
+      (v) => {
+        // `undefined` explícito tem de ser tratado aqui: passado à função, ele
+        // acionaria o default dela, que lê `process.env` e não o `source` do loadEnv.
+        if (v === undefined) return true;
+        try {
+          esforcoDeRaciocinioOpenAI(v);
+          return true;
+        } catch {
+          return false;
+        }
+      },
+      'use none | minimal | low | medium | high | xhigh (ou deixe vazio)',
+    ),
   // Payload curado da tool get_lead_context.
   LEAD_CONTEXT_HISTORY_LIMIT: z.coerce.number().int().positive().default(20),
   LEAD_CONTEXT_MAX_TOKENS: z.coerce.number().int().positive().default(1_000),
@@ -154,8 +203,15 @@ const envSchema = z.object({
   PRUNE_TOOL_RESULTS_WINDOW_TURNS: z.coerce.number().int().positive().default(4),
   PRUNE_TOOL_RESULTS_MIN_RESULT_TOKENS: z.coerce.number().int().positive().default(200),
   // Skills situacionais — near-misses viram candidatos ao golden set (curadoria
-  // humana; escrita por fs em runtime, gitignored).
-  GOLDEN_CANDIDATES_DIR: z.string().min(1).default('lib/agent-engine/golden-candidates'),
+  // humana). Desde a #1695 o candidato é uma LINHA em `golden_candidates` (só
+  // rótulo, sem texto de cliente, com retenção) e não mais um JSON escrito em
+  // disco: `false` desliga a gravação. A chave antiga, `GOLDEN_CANDIDATES_DIR`,
+  // saiu junto com o disco — o diretório que ela nomeava não é escrito por
+  // ninguém, e uma chave morta no `.env` mentiria para quem chegasse depois.
+  GOLDEN_CANDIDATES_ENABLED: z
+    .enum(['true', 'false'])
+    .default('true')
+    .transform((v) => v === 'true'),
   // Classificadores auxiliares (modelo BARATO; sem valor = default da org).
   STAGE_CLASSIFIER_MODEL: z.string().min(1).optional(),
   JAILBREAK_CLASSIFIER_MODEL: z.string().min(1).optional(),

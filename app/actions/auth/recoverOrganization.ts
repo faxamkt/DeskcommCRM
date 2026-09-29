@@ -7,6 +7,9 @@ import { requireAuth, resolveActiveOrg } from "@/lib/auth/server";
 import { createClient } from "@/lib/supabase/server";
 import { ensureTenantForUser } from "@/lib/auth/provision";
 import { decidirConviteDoSignup } from "@/lib/auth/convite-no-signup";
+import { modoDeCadastro } from "@/lib/auth/politica-de-cadastro";
+import { createRegistrationRequest, estadoDoPedido } from "@/lib/auth/registration-requests";
+import { acessoFoiRevogado } from "@/lib/auth/vinculo-revogado";
 import { organizationNameSchema } from "@/lib/auth/schemas";
 import { audit } from "@/lib/audit";
 import { authRateLimited, AUTH_LIMITS } from "@/lib/auth/rate-limit";
@@ -15,7 +18,14 @@ export type RecoverOrganizationResult =
   | { ok: true }
   | {
       ok: false;
-      error: "validation_error" | "rate_limited" | "invite_pending" | "provision_failed";
+      error:
+        | "validation_error"
+        | "rate_limited"
+        | "invite_pending"
+        | "somente_convite"
+        | "provision_failed"
+        | "access_revoked"
+        | "pedido_recusado";
     };
 
 /**
@@ -66,6 +76,24 @@ export async function recoverOrganization(name: string): Promise<RecoverOrganiza
   } = await supabase.auth.getUser();
   if (!authUser) return { ok: false, error: "provision_failed" };
 
+  // QUEM PERDEU O ACESSO NÃO É UM VISITANTE NOVO. Esta ação existe para a
+  // pessoa cujo provisionamento FALHOU no primeiro acesso — não para quem teve
+  // o vínculo retirado por um administrador. Sem esta guarda, revogar alguém
+  // lhe dava, na prática, um tenant próprio dentro da mesma instalação.
+  //
+  // Medido em 2026-09-10: um membro revogado chegou até este formulário e só
+  // foi barrado porque ainda tinha `invite_token` no `user_metadata` — acidente,
+  // não guarda —, recebendo de volta "convite pendente ou inválido", que não
+  // era a verdade sobre o que tinha acontecido com ele.
+  if (await acessoFoiRevogado(authUser.id)) {
+    void audit({
+      action: "auth.signup_provision_recusado",
+      actorUserId: authUser.id,
+      metadata: { motivo: "acesso_revogado" },
+    });
+    return { ok: false, error: "access_revoked" };
+  }
+
   const decisao = decidirConviteDoSignup(authUser);
   if (decisao.tipo !== "provisionar") {
     void audit({
@@ -76,8 +104,55 @@ export async function recoverOrganization(name: string): Promise<RecoverOrganiza
     return { ok: false, error: "invite_pending" };
   }
 
+  // A QUARTA PORTA, e ela não estava no desenho original — apareceu medindo.
+  // Esta action também provisiona organização, então numa instalação em
+  // `so_convite` ela seria a saída de emergência que reabre o que as outras
+  // três fecharam: bastaria criar a conta por qualquer via, chegar sem vínculo,
+  // e pedir a recuperação. Fechar só a tela de cadastro seria outro capacho.
+  const modo = await modoDeCadastro();
+  if (modo === "so_convite") {
+    void audit({
+      action: "auth.signup_provision_recusado",
+      actorUserId: authUser.id,
+      metadata: { motivo: "somente_convite" },
+    });
+    return { ok: false, error: "somente_convite" };
+  }
+
   if (await authRateLimited("org_recovery", authUser.id, AUTH_LIMITS.org_recovery)) {
     return { ok: false, error: "rate_limited" };
+  }
+
+  // COM APROVAÇÃO (migration 0383, recorte do PR #714): esta é a ÚNICA porta
+  // que cria o pedido — `/auth/confirm` e `/auth/callback` mandam para cá em
+  // vez de provisionar. A empresa nasce só na aprovação do administrador da
+  // instalação (`app/actions/registration/decide.ts`).
+  if (modo === "com_aprovacao") {
+    // Recusa é final. Sem esta guarda, recusar seria decoração: bastaria
+    // enviar o pedido de novo, e o índice só impede DOIS pendentes.
+    if ((await estadoDoPedido(authUser.id)) === "rejected") {
+      return { ok: false, error: "pedido_recusado" };
+    }
+    try {
+      const pedido = await createRegistrationRequest(authUser.id, parsed.data);
+      if (pedido.created) {
+        void audit({
+          action: "registration.requested",
+          actorUserId: authUser.id,
+          resourceType: "registration_request",
+          resourceId: pedido.id,
+        });
+      }
+    } catch (error) {
+      void audit({
+        action: "auth.signup_provision_recovery_failed",
+        actorUserId: authUser.id,
+        metadata: { reason: error instanceof Error ? error.message : String(error) },
+      });
+      return { ok: false, error: "provision_failed" };
+    }
+    revalidatePath("/get-started");
+    redirect("/get-started");
   }
 
   try {

@@ -11,6 +11,7 @@ import {
   type FollowupJobRequest,
   type TickDeps,
 } from "@/lib/followup/engine";
+import { encerrarRoteirosVencidos } from "@/lib/followup/atendimento";
 import { enviarTextoFixoPendente } from "@/lib/followup/enviar-texto-fixo";
 import type { EnrollmentRow } from "@/lib/followup/node-handlers";
 import { createSupabaseSilenceSweepDb, runSilenceSweep } from "@/lib/followup/silence-sweep";
@@ -74,8 +75,8 @@ async function aplicarRespostasQueChegaram(admin: SupabaseClient, deps: TickDeps
 }
 
 /**
- * Roda as tarefas de minuto neste processo — sem depender do crontab da VPS
- * nem do cron pago da Vercel.
+ * Roda as tarefas de minuto neste processo — sem depender do contêiner
+ * `scheduler` do compose nem de um cron da hospedagem.
  */
 export async function executarTickDoRelogio(): Promise<{
   tarefas: ResultadoDeTarefa[];
@@ -112,9 +113,9 @@ export async function executarTickDoRelogio(): Promise<{
     const acordados = await aplicarRespostasQueChegaram(admin, deps);
     if (acordados > 0) {
       mexeu = true;
-      // Sem esta linha o SIM que a ingestão do canal gravou e o Hobby não
-      // processou some
-      // do radar — o sintoma é "Aguardando resposta" com mensagem na inbox.
+      // Sem esta linha o SIM que a ingestão do canal gravou e nenhum tick
+      // processou some do radar — o sintoma é "Aguardando resposta" com
+      // mensagem na inbox.
       logger.info("[relogio] follow-up avancou por resposta inbound", { acordados });
     }
     const summary = await runFollowupTick(deps);
@@ -137,6 +138,17 @@ export async function executarTickDoRelogio(): Promise<{
       if (sweep.enrolled || sweep.pointers_gated_out || sweep.skipped_existing) mexeu = true;
     } catch (err) {
       logger.warn("[relogio] silence sweep falhou", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    try {
+      const expirados = await encerrarRoteirosVencidos(admin);
+      if (expirados > 0) {
+        mexeu = true;
+        logger.info("[relogio] roteiros de atendimento encerrados por prazo", { expirados });
+      }
+    } catch (err) {
+      logger.warn("[relogio] prazo dos roteiros falhou", {
         error: err instanceof Error ? err.message : String(err),
       });
     }

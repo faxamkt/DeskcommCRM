@@ -3,8 +3,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useT } from "@/hooks/i18n/useT";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useAuth } from "@/hooks/auth/AuthProvider";
+import { fonteDeTemplates } from "@/lib/channels/templates-fonte";
 import { estadoDaJanela, formatarDecorrido } from "@/lib/channels/janela";
 import { JanelaFechadaAviso } from "@/components/inbox/JanelaFechadaAviso";
+import { NumeroForaDoAr } from "@/components/inbox/NumeroForaDoAr";
 import { useClaimConversation } from "@/hooks/inbox/useClaimConversation";
 import { useCloseConversation } from "@/hooks/inbox/useCloseConversation";
 import { useMarkAsRead } from "@/hooks/inbox/useMarkAsRead";
@@ -27,11 +29,13 @@ import { InboxKeyboardShortcuts } from "./InboxKeyboardShortcuts";
 import { ShortcutsHelpDialog } from "./ShortcutsHelpDialog";
 import { OpenConversationProvider } from "@/hooks/notifications/OpenConversationContext";
 // ADR-05: ícone de feature sai do mapa canônico, nunca do pacote direto.
-import { CaretLeft, ChatCircle, IdentificationCard } from "@/lib/ui/icons";
+import { CaretLeft, ChatCircle, IdentificationCard, MagnifyingGlass, X } from "@/lib/ui/icons";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { cn } from "@/lib/utils";
 import { comandosDaFila } from "@/lib/inbox/comando-da-conversa";
+import type { AvisoDeRascunho } from "@/lib/inbox/rascunho-sugerido";
+import { buscaValeConsulta } from "@/lib/inbox/termo-de-busca";
 import { useAutomaticoAtivo } from "@/hooks/ai/useAutomaticoAtivo";
 
 /**
@@ -88,6 +92,15 @@ export function tabToFilter(
       return { assigned_to: "me", exclude_finished: true };
     case "closed":
       return { status: "closed" };
+    case "archived":
+      // O ARQUIVO É UM ESTADO SÓ ELE, não `in(terminais)`.
+      //
+      // `CONVERSATION_TERMINAL_STATUSES` responde outra pergunta ("o que sai do
+      // fluxo vivo", usada pelo `exclude_finished` de Minhas). Reaproveitá-la
+      // aqui faria a aba Arquivadas listar também as fechadas — duas abas com a
+      // mesma lista e badges diferentes, que é a mentira de tela que o mapa
+      // abaixo existe para impedir.
+      return { status: "archived" };
     case "ai":
       // `ai_handling` é escrito por UM caminho só em produção (a volta pelo botão
       // "Devolver ao automático"), então a aba vivia mostrando 2 enquanto o robô
@@ -99,7 +112,7 @@ export function tabToFilter(
   }
 }
 
-const FILTER_TABS: InboxTab[] = ["unassigned", "mine", "all", "closed", "ai"];
+const FILTER_TABS: InboxTab[] = ["unassigned", "mine", "all", "closed", "archived", "ai"];
 
 /**
  * Lê ?filter= (G4-02, deep-link). ?filter=all é HONRADO mesmo para agent — a
@@ -111,9 +124,11 @@ function parseFilterParam(v: string | null): InboxTab {
 
 interface InboxLayoutProps {
   initialSelectedId?: string | null;
+  /** Rascunho sugerido por integração (issue #1611) — `null` é o caso comum. */
+  rascunho?: AvisoDeRascunho | null;
 }
 
-export function InboxLayout({ initialSelectedId = null }: InboxLayoutProps = {}) {
+export function InboxLayout({ initialSelectedId = null, rascunho = null }: InboxLayoutProps = {}) {
   const t = useT();
   const { activeOrg, user } = useAuth();
   const supportReadonly = user.support?.access_mode === "support_readonly";
@@ -123,11 +138,13 @@ export function InboxLayout({ initialSelectedId = null }: InboxLayoutProps = {})
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const tab = parseFilterParam(searchParams.get("filter"));
+  const idNaUrl = searchParams.get("id");
 
   // tab vive na URL (?filter=); os demais filtros são estado local de sessão.
   const [aux, setAux] = useState<Omit<InboxFiltersValue, "tab">>({
     search: "",
     onlyUnread: false,
+    onlyGroups: false,
   });
   const filterValue: InboxFiltersValue = { tab, ...aux };
   const setFilterValue = useCallback(
@@ -143,11 +160,30 @@ export function InboxLayout({ initialSelectedId = null }: InboxLayoutProps = {})
     [tab, searchParams, router, pathname],
   );
 
-  const [selectedId, setSelectedId] = useState<string | null>(initialSelectedId);
+  // Desliga só os AUXILIARES e mantém a aba: a aba é onde a pessoa está, e
+  // limpá-la junto a tiraria do lugar sem ela ter pedido.
+  const limparFiltrosAuxiliares = useCallback(() => {
+    setFilterValue({ tab, search: "", onlyUnread: false, onlyGroups: false });
+  }, [tab, setFilterValue]);
+
+  const [selectedId, setSelectedId] = useState<string | null>(initialSelectedId ?? idNaUrl);
+  const ultimoIdNaUrl = useRef(idNaUrl);
   const [visibleIds, setVisibleIds] = useState<string[]>([]);
   const [helpOpen, setHelpOpen] = useState(false);
   /** A ficha do contato como painel deslizante — só existe abaixo do `xl`. */
   const [fichaAberta, setFichaAberta] = useState(false);
+  /**
+   * A busca dentro da conversa (#1793) pertence à CONVERSA em que foi aberta.
+   * Guardar o id junto fecha a busca em qualquer troca — clique, atalho j/k,
+   * voltar do navegador — sem que cada caminho precise lembrar de limpá-la.
+   */
+  const [busca, setBusca] = useState<{ conversaId: string; termo: string } | null>(null);
+  const buscaAberta = busca !== null && busca.conversaId === selectedId;
+  const botaoBuscaRef = useRef<HTMLButtonElement | null>(null);
+  const fecharBusca = useCallback(() => {
+    setBusca(null);
+    botaoBuscaRef.current?.focus();
+  }, []);
   /**
    * A mensagem escolhida para responder "em cima".
    *
@@ -155,6 +191,23 @@ export function InboxLayout({ initialSelectedId = null }: InboxLayoutProps = {})
    * quem MOSTRA é o composer — são irmãos, e o estado comum é do pai.
    */
   const [respondendo, setRespondendo] = useState<ConversationMensagem | null>(null);
+  /**
+   * O rascunho sugerido (#1611) vale para a conversa da URL e só enquanto ela
+   * está aberta: sair dela — clique, atalho ou voltar do navegador — o descarta
+   * de vez. Sem isto o texto escrito para um cliente ficava no campo do próximo,
+   * já sem a faixa de origem. Ajuste de estado durante o render, o padrão do
+   * React para "estado que depende de outro estado".
+   */
+  const [rascunhoVivo, setRascunhoVivo] = useState(rascunho);
+  if (rascunhoVivo && selectedId !== rascunhoVivo.conversationId) setRascunhoVivo(null);
+
+  useEffect(() => {
+    if (ultimoIdNaUrl.current === idNaUrl) return;
+    ultimoIdNaUrl.current = idNaUrl;
+    // O histórico do navegador também troca a conversa, sem carregar a página inteira.
+    setSelectedId(idNaUrl);
+    setRespondendo(null);
+  }, [idNaUrl]);
 
   /**
    * A ORG tem automático de pé? Sobe para cá porque agora é a ABA que precisa —
@@ -172,9 +225,18 @@ export function InboxLayout({ initialSelectedId = null }: InboxLayoutProps = {})
   const filters: ConversationsFilters = useMemo(
     () => ({
       ...tabToFilter(filterValue.tab, automaticoDaOrg),
-      search: filterValue.search || undefined,
+      // A tela NÃO pede o que a rota recusa: o hook trata falha com
+      // `showApiError`, então digitar a primeira letra de qualquer busca faria
+      // piscar um erro na cara de quem digita. A regra é a MESMA que o schema
+      // usa (`lib/inbox/termo-de-busca.ts`) — nunca repetida aqui.
+      search: buscaValeConsulta(filterValue.search)
+        ? filterValue.search
+        : undefined,
       channel_session_id: filterValue.channel_session_id,
       tag: filterValue.tag,
+      tagMode: filterValue.tagMode,
+      unread: filterValue.onlyUnread || undefined,
+      is_group: filterValue.onlyGroups || undefined,
     }),
     [
       filterValue.tab,
@@ -182,16 +244,12 @@ export function InboxLayout({ initialSelectedId = null }: InboxLayoutProps = {})
       filterValue.search,
       filterValue.channel_session_id,
       filterValue.tag,
+      filterValue.tagMode,
+      filterValue.onlyUnread,
+      filterValue.onlyGroups,
     ],
   );
 
-  const clientFilter = useMemo(
-    () =>
-      filterValue.onlyUnread
-        ? (c: ConversationWithContact) => (c.unread_count_for_assignee ?? 0) > 0
-        : undefined,
-    [filterValue.onlyUnread],
-  );
 
   // We need the selected conversation object for header / composer / side panel.
   // Source it from the same query the list uses to avoid an extra request.
@@ -204,7 +262,35 @@ export function InboxLayout({ initialSelectedId = null }: InboxLayoutProps = {})
   // Deep-link para conversa fora do filtro atual (ou fora do escopo do agent):
   // busca única RLS-scoped. 404/vazio ⇒ inacessível ⇒ estado vazio claro (GAP D),
   // nunca stack trace. A RLS (G4-01) é quem garante o não-vazamento.
-  const needsFetch = !!selectedId && !inList && !listQ.isLoading;
+  //
+  // ⚠️ ELA NÃO ESPERA A LISTA — e a espera custava DUAS voltas de rede inteiras.
+  //
+  // A condição tinha um terceiro termo, `&& !listQ.isLoading`, para poupar uma
+  // requisição quando a conversa fosse aparecer na lista de qualquer jeito. O
+  // preço real, medido no trace do CI (run 34226618108, deep-link para uma
+  // conversa FECHADA — que nenhuma aba da Fila devolve, então a busca única é a
+  // única fonte do objeto):
+  //
+  //   46.725  GET conversations?comando=aguardando               1091ms
+  //   48.275  GET conversations?comando=aguardando,automatico     896ms
+  //   49.183  GET conversations/<id>                              565ms
+  //   49.775  GET contacts/<id>/crm-summary                    (>1034ms)
+  //
+  // São QUATRO idas em série depois do documento. A lista é pedida duas vezes
+  // porque a `queryKey` muda quando `useAutomaticoAtivo` responde (ver
+  // `comandosDaFila`), e `isLoading` volta a ser verdadeiro na chave nova — ou
+  // seja, o gate segurava a busca única até a SEGUNDA lista assentar, e só
+  // então o painel do contato podia começar a carregar. O painel do contato
+  // aparecia ~4,7s depois da navegação, e é assim que `encerramento-atendimento`
+  // ficou intermitente: a Memória do contato chegava ~0,1–0,6s DEPOIS dos 5s da
+  // asserção (o screenshot de falha, tirado logo em seguida, já a mostra).
+  //
+  // Sem o gate, a busca única sai na primeira leva, em paralelo com a lista, e o
+  // objeto existe uma volta depois do documento em vez de três. O custo é UMA
+  // requisição extra por deep-link cuja conversa acabe aparecendo na lista —
+  // clicar numa conversa da lista já carregada continua sem pedir nada, porque
+  // aí `inList` já a tem no primeiro render.
+  const needsFetch = !!selectedId && !inList;
   const single = useConversation(selectedId, needsFetch);
   const selectedConversation: ConversationWithContact | null = inList ?? single.data ?? null;
   const selectionNotFound =
@@ -226,16 +312,22 @@ export function InboxLayout({ initialSelectedId = null }: InboxLayoutProps = {})
   // É um SUPERCONJUNTO do `handleSelect` do upstream — o tipo dele não aceita
   // `null`, e sem isso o botão de voltar não teria o que chamar.
   //
-  // A seleção NÃO vive na URL (só o `?filter=` vive) — então este voltar é
-  // estado local, e o botão de voltar do navegador não desfaz a seleção. É a
-  // limitação conhecida deste caminho; trocar por URL mudaria o deep-link de
-  // conversa, que hoje entra por `initialSelectedId` vindo da rota.
   const handleSelect = useCallback((id: string | null) => {
+    if (id === selectedId) return;
     setSelectedId(id);
     // Sem isto, escolher "responder" numa conversa e trocar para outra levaria
     // a citação junto — e a resposta sairia citando mensagem de outro cliente.
     setRespondendo(null);
-  }, []);
+    // ?id= é o formato já usado pelos atalhos do CRM. A History API mantém a
+    // seleção instantânea sem pedir um novo Server Component a cada clique.
+    const params = new URLSearchParams(searchParams.toString());
+    if (id) params.set("id", id);
+    else params.delete("id");
+    // O ?rascunho= é da conversa que ficou para trás (ver `rascunhoVivo`).
+    params.delete("rascunho");
+    const query = params.toString();
+    window.history.pushState(null, "", query ? `${pathname}?${query}` : pathname);
+  }, [selectedId, searchParams, pathname]);
   const handleVisibleChange = useCallback((ids: string[]) => setVisibleIds(ids), []);
   const handleFocusReply = useCallback(() => composerRef.current?.focus(), []);
   const handleClaim = useCallback(() => {
@@ -275,7 +367,9 @@ export function InboxLayout({ initialSelectedId = null }: InboxLayoutProps = {})
   );
   const motivoDaJanela =
     janela.tipo === "fechada"
-      ? janela.fechadaHaMs === null
+      ? fonteDeTemplates(selectedConversation?.channel_sessions?.provider) === null
+        ? t("Aguarde uma nova mensagem do cliente para reabrir o atendimento nesta rede.")
+        : janela.fechadaHaMs === null
         ? t("O cliente ainda não escreveu — a janela de 24h nunca abriu. Só um modelo aprovado sai daqui.")
         : `${t("A janela de 24h fechou há")} ${formatarDecorrido(janela.fechadaHaMs)}. ${t("Só um modelo aprovado sai daqui — texto livre é recusado pela plataforma.")}`
       : null;
@@ -329,7 +423,7 @@ export function InboxLayout({ initialSelectedId = null }: InboxLayoutProps = {})
   return (
     <OpenConversationProvider conversationId={selectedId}>
     <div
-      className="grid h-[calc(100dvh-3.5rem-2*var(--space-6))] w-full grid-cols-1 md:grid-cols-[300px_1fr] xl:grid-cols-[272px_1fr_296px] 2xl:grid-cols-[300px_1fr_320px]"
+      className="grid h-[calc(100dvh-3.5rem-var(--space-6)-max(var(--space-6),var(--rodape-ocupado,0px)))] w-full grid-cols-1 md:grid-cols-[300px_1fr] xl:grid-cols-[272px_1fr_296px] 2xl:grid-cols-[300px_1fr_320px]"
       /*
        * O ESTADO DO TEMPO REAL, LEGÍVEL DE FORA — mesmo par que o dossiê do lead
        * já publica (`LeadDossier`), e pela mesma razão: quando a entrega morre,
@@ -379,8 +473,8 @@ export function InboxLayout({ initialSelectedId = null }: InboxLayoutProps = {})
             filters={filters}
             selectedId={selectedId}
             onSelect={handleSelect}
-            clientFilter={clientFilter}
             onVisibleChange={handleVisibleChange}
+            onLimparFiltros={limparFiltrosAuxiliares}
           />
         </div>
       </div>
@@ -399,7 +493,7 @@ export function InboxLayout({ initialSelectedId = null }: InboxLayoutProps = {})
       */}
       <div
         className={cn(
-          "h-full min-h-0 flex-col md:flex",
+          "h-full min-h-0 min-w-0 flex-col md:flex",
           colunas.conversa,
         )}
       >
@@ -439,11 +533,74 @@ export function InboxLayout({ initialSelectedId = null }: InboxLayoutProps = {})
         )}
         {selectedConversation ? (
           <>
-            <ConversationHeader conversation={selectedConversation} />
+            {/* `key`: trocar de conversa desmonta a confirmação de Fechar/Arquivar
+                aberta — senão o clique de dentro agiria sobre a conversa nova. */}
+            <ConversationHeader
+              key={selectedConversation.id}
+              conversation={selectedConversation}
+              onAbrirConversa={handleSelect}
+              onBuscar={() =>
+                buscaAberta
+                  ? fecharBusca()
+                  : setBusca({ conversaId: selectedConversation.id, termo: "" })
+              }
+              buscaAberta={buscaAberta}
+              botaoBuscaRef={botaoBuscaRef}
+            />
+            {buscaAberta && (
+              <div className="flex items-center gap-2 border-b border-border px-4 py-1.5">
+                <MagnifyingGlass size={16} className="shrink-0 text-muted-foreground" aria-hidden />
+                <input
+                  type="search"
+                  autoFocus
+                  className="min-w-0 flex-1 bg-transparent py-1 text-sm outline-hidden placeholder:text-muted-foreground"
+                  aria-label={t("Buscar nas mensagens carregadas")}
+                  placeholder={t("Buscar nas mensagens carregadas")}
+                  value={busca.termo}
+                  onChange={(e) => setBusca({ conversaId: busca.conversaId, termo: e.target.value })}
+                  onKeyDown={(e) => {
+                    if (e.key === "Escape") fecharBusca();
+                  }}
+                />
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="w-11 shrink-0 px-0 lg:w-8"
+                  aria-label={t("Fechar busca")}
+                  onClick={fecharBusca}
+                >
+                  <X size={16} aria-hidden />
+                </Button>
+              </div>
+            )}
             <div className="min-h-0 flex-1 overflow-hidden">
-              <ChatThread conversationId={selectedConversation.id} onResponder={setRespondendo} />
+              <ChatThread
+                conversationId={selectedConversation.id}
+                searchTerm={buscaAberta ? busca.termo : ""}
+                provider={selectedConversation.channel_sessions?.provider ?? null}
+                onResponder={setRespondendo}
+                // O cartão da passagem escolhe o gesto a partir de quem é o dono
+                // da conversa: sem dono convida a assumir, com outro dono diz
+                // quem atende. Sem estes dois campos ele cairia no estado mais
+                // conservador e ficaria mudo justamente para quem mais precisa.
+                dono={{
+                  userId: selectedConversation.assigned_to_user_id ?? null,
+                  nome: selectedConversation.assigned_to_user_name ?? null,
+                }}
+                contatoId={selectedConversation.contacts?.id ?? null}
+              />
             </div>
             <RetentionNotice conversationId={selectedConversation.id} />
+            {selectedConversation.contacts?.id && (
+              <NumeroForaDoAr
+                key={`numero:${selectedConversation.id}`}
+                conversationId={selectedConversation.id}
+                channelSessionId={selectedConversation.channel_session_id}
+                contactId={selectedConversation.contacts.id}
+                contactPhone={selectedConversation.contacts.phone_number ?? null}
+                onAbrirConversa={handleSelect}
+              />
+            )}
             {motivoDaJanela && (
               <JanelaFechadaAviso
                 conversationId={selectedConversation.id}
@@ -452,6 +609,10 @@ export function InboxLayout({ initialSelectedId = null }: InboxLayoutProps = {})
               />
             )}
             <Composer
+              // Trocar a chave quando o rascunho sai REMONTA o composer: o texto
+              // nasce de `useState(initialDraft)`, e só a prop mudar não o limparia.
+              // Sem rascunho a chave é fixa e a troca de conversa segue como antes.
+              key={rascunhoVivo ? `rascunho:${rascunhoVivo.conversationId}` : "composer"}
               ref={composerRef}
               conversationId={selectedConversation.id}
               blockedReason={supportReadonly ? "Acompanhamento somente leitura" : blockedReason}
@@ -461,6 +622,12 @@ export function InboxLayout({ initialSelectedId = null }: InboxLayoutProps = {})
               respondendo={respondendo}
               onCancelarResposta={() => setRespondendo(null)}
               currentContactId={selectedConversation.contact_id}
+              // O aviso é DA conversa da URL: trocar de conversa dentro da inbox
+              // não pode deixar um texto sugerido no campo de outra pessoa.
+              rascunho={rascunhoVivo}
+              initialDraft={
+                rascunhoVivo?.leitura.estado === "sugerido" ? rascunhoVivo.leitura.texto : ""
+              }
             />
           </>
         ) : selectionNotFound ? (
@@ -476,7 +643,7 @@ export function InboxLayout({ initialSelectedId = null }: InboxLayoutProps = {})
         )}
       </div>
 
-      <div className="hidden h-full min-h-0 xl:block">
+      <div className="hidden h-full min-h-0 min-w-0 xl:block">
         <CRMSidePanel conversation={selectedConversation} />
       </div>
 

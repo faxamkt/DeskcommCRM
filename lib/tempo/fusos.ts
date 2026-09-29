@@ -44,6 +44,13 @@ export const FUSOS_OFERECIDOS: { codigo: string; rotulo: string }[] = [
   { codigo: "America/Belem", rotulo: "Belém (Brasil)" },
   { codigo: "America/Recife", rotulo: "Recife (Brasil)" },
   { codigo: "America/Fortaleza", rotulo: "Fortaleza (Brasil)" },
+  // Fora da América do Sul, e de propósito: quem instala em Angola fala
+  // português e usava a lista inteira errada. Aditivo — `FUSO_PADRAO` segue
+  // `America/Sao_Paulo`, então ninguém que já escolheu muda de relógio.
+  { codigo: "Africa/Luanda", rotulo: "Luanda (Angola)" },
+  // Mesmo motivo, em Portugal: sem Lisboa, quem opera lá ficava entre um fuso
+  // do Brasil e UTC — e UTC erra uma hora no verão europeu.
+  { codigo: "Europe/Lisbon", rotulo: "Lisboa (Portugal)" },
   { codigo: "UTC", rotulo: "UTC" },
 ];
 
@@ -79,4 +86,53 @@ export function fusoValido(tz: string): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * O primeiro fuso utilizável da lista — e `FUSO_PADRAO` quando nenhum serve.
+ *
+ * Existe porque quem apresenta hora tem uma ORDEM de fontes, não uma fonte: a
+ * escolha da pessoa vem antes da escolha da organização, que vem antes do
+ * padrão do produto. Sem isto, cada tela escreve a própria cadeia de `??` e
+ * uma delas esquece de validar — e o valor que o `Intl` recusa só aparece como
+ * tela branca, porque `Intl.DateTimeFormat` LANÇA com fuso inválido.
+ *
+ * Nenhum escritor valida `organizations.timezone` nem `user_metadata.timezone`
+ * (`tenantSchema` e o schema do onboarding são `z.string().max(64)` sem
+ * `refine`, e a coluna não tem CHECK), então "inutilizável" não é hipótese: é
+ * o campo de texto que alguém preencheu com acento.
+ *
+ * Falha ABERTA, como `fusoDaOrganizacao`: uma hora de diferença é melhor que
+ * uma tela que não abre.
+ */
+export function fusoUtilizavel(...candidatos: (string | null | undefined)[]): string {
+  for (const bruto of candidatos) {
+    const tz = bruto?.trim() ?? "";
+    if (tz !== "" && fusoValido(tz)) return tz;
+  }
+  return FUSO_PADRAO;
+}
+
+/**
+ * O fuso INICIAL de um formulário que só oferece `FUSOS_OFERECIDOS` (um
+ * <select>): o da organização, se estiver entre as opções; senão `FUSO_PADRAO`.
+ *
+ * `fusoUtilizavel` responde "o runtime aceita?", e isso não basta aqui: um fuso
+ * válido que não está na lista (`America/Chihuahua`) não teria <option> no
+ * <select>, e a tela mostraria outro fuso enquanto o estado guarda esse. Fora da
+ * lista, cai no padrão — o mesmo que o formulário sempre sugeriu.
+ */
+export function fusoOferecidoOuPadrao(tz: string | null | undefined): string {
+  const candidato = tz?.trim() ?? "";
+  return FUSOS_OFERECIDOS.some((f) => f.codigo === candidato) ? candidato : FUSO_PADRAO;
+}
+
+/**
+ * O fuso dito como gente fala, para a tela: "Manaus" de `America/Manaus`,
+ * "Buenos Aires" de `America/Argentina/Buenos_Aires`. Fuso sem barra volta como
+ * veio (nunca string vazia).
+ */
+export function cidadeDoFuso(timezone: string): string {
+  const ultimo = timezone.split("/").at(-1) ?? timezone;
+  return ultimo.replace(/_/g, " ");
 }

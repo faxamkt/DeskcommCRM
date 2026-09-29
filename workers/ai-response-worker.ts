@@ -22,7 +22,7 @@ import { generateText, type LanguageModel } from "ai";
 
 import { DEFAULT_BOT_MODEL, gatewayConfig, gatewayHeaders } from "@/lib/ai/gateway";
 import { embedText } from "@/lib/ai/embed";
-import { MODELO_DE_EMBEDDING } from "@/lib/ai/embeddings/chave";
+import { MODELO_DE_EMBEDDING_DO_GOOGLE } from "@/lib/ai/embeddings/chave";
 import { getBudgetStatus, type BudgetStatus } from "@/lib/ai/budget/check";
 import {
   AVISO_CORPO,
@@ -61,6 +61,20 @@ const RAG_TOP_K = 5;
 // Com 0.72 toda parafrase — que e como o cliente escreve — era descartada, e o RAG parecia quebrado funcionando.
 // O banco moveu o default; estes tres sitios de codigo ficaram para tras e venciam o banco, porque quem corta pelo limiar e o TypeScript.
 const RAG_THRESHOLD = 0.4;
+/**
+ * Limiar do gate G3 (bot inseguro) — era o `config` do agente, que a tela
+ * deixou de oferecer (issue #1660).
+ *
+ * O campo "Confidence threshold" prometia escalar para humano abaixo do limiar
+ * e não controlava nada: quem lia a chave era ESTE bloco, que roda depois de
+ * `if (!elegivelParaWorkerLegado(ctx.agent)) return ...`, e a régua devolve
+ * `false` desde 07/09 — ou seja, o valor gravado nunca foi ouvido. Em vez de
+ * deixar o worker lendo uma chave que nenhum formulário mais escreve
+ * (referência órfã), o gate fica com o número que já era o fallback quando a
+ * chave faltava. Religar o worker legado mantém o G3 funcionando; é este
+ * limiar que vale, e não mais o que estiver gravado no jsonb do agente.
+ */
+const LIMIAR_DE_CONFIANCA_G3 = 0.5;
 const WINDOW_24H_MS = 24 * 60 * 60 * 1000;
 const HANDOFF_RECENT_GUARD_MS = 5_000;
 
@@ -127,6 +141,7 @@ export async function processMessageReceived(row: EventRow): Promise<ProcessResu
       serviceBoundary: ctx.serviceBoundary,
       organizationId: ctx.organization_id,
       reason: "requested_human",
+      origem: "legado_pedido",
       leadId,
       metadata: { message_id: ctx.message_id, source: "g1_regex" },
     });
@@ -139,6 +154,7 @@ export async function processMessageReceived(row: EventRow): Promise<ProcessResu
       serviceBoundary: ctx.serviceBoundary,
       organizationId: ctx.organization_id,
       reason: "legal_mention",
+      origem: "legado_juridico",
       leadId,
       metadata: { message_id: ctx.message_id, source: "g4_legal_regex" },
     });
@@ -152,6 +168,7 @@ export async function processMessageReceived(row: EventRow): Promise<ProcessResu
       serviceBoundary: ctx.serviceBoundary,
       organizationId: ctx.organization_id,
       reason: "critical_stage",
+      origem: "legado_etapa",
       leadId,
       metadata: { message_id: ctx.message_id, source: "g4_stage_requires_human" },
     });
@@ -242,16 +259,15 @@ export async function processMessageReceived(row: EventRow): Promise<ProcessResu
     // ── G3 — bot's own response signals low confidence / uncertainty.
     //    Persist the message (may serve as a draft for the human) but DO NOT
     //    dispatch via WAHA, and trigger handoff. ----------------------------
-    const confidence = response.citations[0]?.similarity ?? 0;
-    const confidenceThreshold =
-      typeof ctx.agent.config?.["confidence_threshold"] === "number"
-        ? (ctx.agent.config["confidence_threshold"] as number)
-        : 0.5;
+    // `?? null`, nunca `?? 0`: sem citação não houve medição de similaridade, e
+    // zero é uma AFIRMAÇÃO ("o material é péssimo") que escala para humano toda
+    // resposta que não consultou a base. Ver o cabeçalho de `checkG3`.
+    const confidence = response.citations[0]?.similarity ?? null;
     if (
       checkG3({
         confidence,
         outputText: response.text,
-        threshold: confidenceThreshold,
+        threshold: LIMIAR_DE_CONFIANCA_G3,
       })
     ) {
       const persisted = await persistAndDispatch(ctx, response, post.text, {
@@ -263,12 +279,13 @@ export async function processMessageReceived(row: EventRow): Promise<ProcessResu
         serviceBoundary: ctx.serviceBoundary,
         organizationId: ctx.organization_id,
         reason: "low_confidence",
+        origem: "legado_confianca",
         leadId,
         metadata: {
           message_id: ctx.message_id,
           outbound_message_id: persisted.outbound_message_id,
           confidence,
-          confidence_threshold: confidenceThreshold,
+          limiar: LIMIAR_DE_CONFIANCA_G3,
           source: "g3_low_confidence",
         },
       });
@@ -502,6 +519,7 @@ async function vetoPorTetoDeGasto(alvo: {
     serviceBoundary: alvo.serviceBoundary,
     organizationId: orgId,
     reason: HANDOFF_REASON_ORCAMENTO,
+    origem: "legado_teto",
     leadId: alvo.leadId,
     metadata: {
       source: "teto_de_gasto",
@@ -606,7 +624,7 @@ async function buildContext(input: BuildContextInput): Promise<GuardDecision> {
   const { data: conv, error: convErr } = await admin
     .from("conversations")
     .select(
-      "id, organization_id, contact_id, channel_session_id, last_inbound_at, bot_silenced_until, last_handoff_at, assignee_kind, contacts:contact_id(id, display_name, locale, is_blocked, force_human)",
+      "id, organization_id, contact_id, channel_session_id, last_inbound_at, bot_silenced_until, last_handoff_at, assignee_kind, contacts:contact_id(id, name, display_name, locale, is_blocked, force_human)",
     )
     .eq("id", input.conversationId)
     .eq("organization_id", input.organizationId)
@@ -626,6 +644,7 @@ async function buildContext(input: BuildContextInput): Promise<GuardDecision> {
     assignee_kind: string | null;
     contacts: {
       id: string;
+      name: string | null;
       display_name: string | null;
       locale: string | null;
       is_blocked: boolean;
@@ -834,6 +853,7 @@ async function buildContext(input: BuildContextInput): Promise<GuardDecision> {
       },
       contact: {
         id: c.contacts.id,
+        name: c.contacts.name,
         display_name: c.contacts.display_name,
         locale: c.contacts.locale,
       },
@@ -903,12 +923,14 @@ async function retrieveContext(input: RetrieveInput): Promise<RagHit[]> {
   if (fontes.length === 0 && !input.kbVersionId) return [];
 
   let embedding: number[];
+  let modelo: string;
   try {
-    const { embedding: e } = await embedText(input.query, {
+    const { embedding: e, model } = await embedText(input.query, {
       organizationId: input.organizationId,
       ponto: "embedding_consultar",
     });
     embedding = e;
+    modelo = model;
   } catch (err) {
     logger.warn("[ai-response-worker] embed falhou; segue sem RAG", {
       error: err instanceof Error ? err.message : String(err),
@@ -927,10 +949,13 @@ async function retrieveContext(input: RetrieveInput): Promise<RagHit[]> {
             p_embedding: embedding as unknown as string,
             p_k: RAG_TOP_K,
             p_threshold: RAG_THRESHOLD,
-            p_embedding_model: MODELO_DE_EMBEDDING,
+            p_embedding_model: modelo,
           } as never,
         )
-      : await admin.rpc(
+      : modelo === MODELO_DE_EMBEDDING_DO_GOOGLE
+        ? // Legado sem filtro de modelo e só com vetores OpenAI (ver search-knowledge.ts).
+          { data: [], error: null }
+        : await admin.rpc(
           "retrieve_top_k_chunks" as never,
           {
             p_organization_id: input.organizationId,

@@ -1,12 +1,13 @@
 "use client";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { apiClient } from "@/lib/api/client";
 import { ApiError } from "@/lib/api/types";
 import { copyToClipboard } from "@/lib/clipboard";
 import { useSystemVersion } from "@/hooks/system/useSystemVersion";
 import { markdownParaTextoSimples } from "@/lib/system/changelog";
+import { textoDaRodadaDoBanco } from "@/lib/system/update-run";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { useT } from "@/hooks/i18n/useT";
@@ -88,6 +89,25 @@ export function UpdatePanel() {
   const nova = semV(data.latest_version);
 
   if (rodando) {
+    /**
+     * ESTE É O TRECHO EM QUE A TELA PARECIA TRAVADA.
+     *
+     * O `POST /update` não executa nada: ele registra o pedido e vai embora.
+     * Quem executa é o `agent.sh` no host, e ele roda de 5 em 5 minutos — entre
+     * o clique e o primeiro passo passam até 5 minutos. Nesse intervalo
+     * `last_step` é nulo, os quatro círculos ficam todos vazios e nada se mexe.
+     *
+     * A pessoa que clicou não tem como distinguir isso de "quebrou". E a lista
+     * de passos, mostrada antes de qualquer passo existir, afirma que o sistema
+     * está trabalhando quando ele ainda nem recebeu a ordem.
+     *
+     * Então o estado de espera é SEU PRÓPRIO estado, com nome, com a razão da
+     * demora e com um relógio que anda.
+     */
+    if (!data.run?.last_step) {
+      return <AguardandoOServidor dispatchedAt={data.run?.dispatched_at} destino={nova} />;
+    }
+
     return (
       <Layout titulo={`${t("Atualizando para a versão")} ${nova}`}>
         <ol className="space-y-2 text-sm">
@@ -111,14 +131,90 @@ export function UpdatePanel() {
     );
   }
 
+  /**
+   * O OUTRO LADO DO MESMO SILÊNCIO — e este era pior que parecer travado.
+   *
+   * `run_result` com sucesso fecha o run e não toca `current_version`: quem
+   * escreve essa coluna é o heartbeat do host, de 5 em 5 minutos. Nesse
+   * intervalo `update_available` continuava verdadeiro, e a tela voltava do
+   * reinício oferecendo "Atualizar agora" para a versão que ACABOU de ser
+   * instalada — quem clicou fazia tudo de novo, ou concluía que não funcionou.
+   *
+   * `just_updated` é essa janela, e só ela: na batida seguinte o host confirma,
+   * o campo vira `false` sozinho e a tela cai no texto normal de quem está em
+   * dia. Não é um estado que alguém precise fechar.
+   *
+   * ## O que esta janela NÃO pode dizer: "você está na versão X"
+   *
+   * O run bem-sucedido é a notícia de que o `update.sh` foi até o fim — não de
+   * que o app está RODANDO na imagem nova. Enquanto o host bate o heartbeat a
+   * diferença some em minutos; quando ele não bate (agente morto, cron
+   * removido, token vencido), ela vira afirmação eterna: medido em produção,
+   * esta tela dizia `1.32.0` com o container rodando `1.23.0`.
+   *
+   * Então a tela nomeia a versão-alvo como PEDIDO — "a atualização para a
+   * versão X terminou" — e diz, na mesma frase, qual é a última versão que o
+   * host CONFIRMOU (`current_version`, a mesma que a tela usa em todos os
+   * outros estados). Sem botão: o pedido já foi atendido, e reoferecê-lo era o
+   * outro defeito desta janela.
+   */
+  // O que a rodada do banco contou de si mesma, em português de gente. Vale nos
+  // dois desfechos em que o servidor mexeu no banco (deu certo / voltou atrás):
+  // quem clicou tem o direito de saber que a base estava ocupada, quantas
+  // retentativas custou e em qual passada fechou. Sem registro na rodada isto é
+  // `null`, e a tela fica calada em vez de afirmar zero.
+  const contaDoBanco = textoDaRodadaDoBanco(data.run?.rodada_do_banco);
+  // O ponteiro para o `.update.log` vem junto do resumo, mas só quando a
+  // rodada REGISTROU disputa — é aí que existe passada por passada para ler.
+  // Rodada medida e limpa fica com o resumo só: endereço de log que ninguém
+  // precisa abrir é linha a mais para ignorar, e quem ignora uma ignora a próxima.
+  const detalheNoLog = data.run?.rodada_do_banco?.disputa === true;
+
+  if (data.just_updated) {
+    const pedida = semV(data.run?.to_version);
+    return (
+      <Layout titulo={`${t("A atualização para a versão")} ${pedida} ${t("terminou")}`}>
+        <p className="text-sm">
+          {t(
+            "O servidor ainda não me confirmou em que versão ele voltou ao ar — a última versão que ele confirmou é a",
+          )}{" "}
+          <strong>{versao}</strong>.
+        </p>
+        <p className="mt-3 text-sm text-muted-foreground">
+          {t(
+            "Assim que ele falar comigo, daqui a alguns minutos, esta tela se atualiza sozinha. Não ofereço atualizar de novo: o pedido já foi atendido.",
+          )}
+        </p>
+        {contaDoBanco ? (
+          <p className="mt-3 text-sm text-muted-foreground">{t(contaDoBanco)}</p>
+        ) : null}
+        {/* O resumo é a ponta; quem quer ver passada por passada precisa saber
+            ONDE. Esse endereço até aqui só existia no log do servidor — quem
+            apertou o botão não tinha como chegar lá sem SSH. Só quando HÁ o que
+            procurar lá (disputa registrada): ponteiro em rodada limpa é ruído, e
+            quem para de ler o ruído para de ler o aviso. */}
+        {detalheNoLog ? (
+          <p className="mt-3 text-sm text-muted-foreground">
+            {t(
+              "O detalhe de cada passada está no arquivo .update.log, na pasta do projeto no servidor.",
+            )}
+          </p>
+        ) : null}
+      </Layout>
+    );
+  }
+
   // As versões de uma falha vêm do RUN, nunca de `current_version`: essa
   // última é o `git describe` do host, e a troca de código já tinha
   // acontecido quando o app quebrou — ela nomeia a versão que FALHOU. O run
   // sabe de onde saiu e para onde tentou ir.
   const alvo = semV(data.run?.to_version);
   const anterior = semV(data.run?.from_version);
+  // Falha já superada por um deploy posterior não é mais o estado do servidor:
+  // mostrar o aviso dela (sem botão) travaria a próxima atualização pela tela.
+  const falhaVigente = !data.run?.superseded;
 
-  if (data.run?.status === "failed_rolled_back") {
+  if (falhaVigente && data.run?.status === "failed_rolled_back") {
     return (
       <Layout titulo={`${t("A atualização para a versão")} ${alvo} ${t("não deu certo")}`}>
         <p className="text-sm">
@@ -130,6 +226,16 @@ export function UpdatePanel() {
           {t("funciona com ele. Se quiser desfazer também o banco, use a cópia de segurança feita antes da tentativa (")}
           <code>bash hostgator-setup-kit/restore.sh</code>).
         </p>
+        {contaDoBanco ? (
+          <p className="mt-3 text-sm text-muted-foreground">{t(contaDoBanco)}</p>
+        ) : null}
+        {detalheNoLog ? (
+          <p className="mt-3 text-sm text-muted-foreground">
+            {t(
+              "O detalhe de cada passada está no arquivo .update.log, na pasta do projeto no servidor.",
+            )}
+          </p>
+        ) : null}
         <DetalhesTecnicos texto={data.run.log_tail} />
         <Saida
           botao={false}
@@ -143,7 +249,7 @@ export function UpdatePanel() {
     );
   }
 
-  if (data.run?.status === "failed") {
+  if (falhaVigente && data.run?.status === "failed") {
     // Já houve aqui um texto próprio para "o host recusou antes de começar",
     // detectado por `last_step` nulo. Era sinal errado: `run_progress` não tem
     // retry e engole falha (o `run_result` insiste por ~2 min), então uma
@@ -340,6 +446,19 @@ export function UpdatePanel() {
         </p>
       )}
 
+      {/* O botão fica ANTES do changelog, não depois: com várias versões
+          acumuladas ele descia para o fim de uma lista longa, e quem só
+          queria clicar "Atualizar agora" precisava rolar por tudo. Os avisos
+          que pesam na decisão (`off_release`, `requires_attention` e o de
+          histórico incompleto) continuam antes DELE — só o "O que muda", que é
+          consulta, não decisão, desceu para depois. O de histórico incompleto
+          entra na lista porque, com `complete === false`, o "Requer atenção"
+          só junta as versões presentes no texto: pode estar faltando aviso, e
+          esse parágrafo é a única pista disso. */}
+      <div className="mb-6">
+        <BotaoAtualizar mutate={() => atualizar.mutate()} isPending={atualizar.isPending} erro={erro} />
+      </div>
+
       {data.notes?.sections.length ? (
         <div className="mb-6">
           <p className="mb-2 text-sm font-medium">{t("O que muda")}</p>
@@ -366,10 +485,76 @@ export function UpdatePanel() {
           ))}
         </div>
       ) : null}
-
-      <BotaoAtualizar mutate={() => atualizar.mutate()} isPending={atualizar.isPending} erro={erro} />
     </Layout>
   );
+}
+
+/**
+ * A ESPERA, com nome e com relógio.
+ *
+ * O pedido fica numa fila que o servidor lê de tempos em tempos — o `agent.sh`
+ * roda de 5 em 5 minutos no host. Antes disto a tela já mostrava a lista dos
+ * quatro passos, todos vazios, dizendo "Atualizando para a versão X": afirmava
+ * trabalho que ainda não tinha começado, e ficava imóvel por até cinco minutos.
+ *
+ * Três coisas, e nenhuma é enfeite:
+ *
+ * 1. **O nome certo do estado.** "Pedido enviado" ≠ "atualizando".
+ * 2. **A razão da demora**, dita antes de ela assustar. Quem sabe que o
+ *    servidor confere a cada poucos minutos não lê a imobilidade como defeito.
+ * 3. **Um relógio que anda.** É o que separa "esperando" de "travou" quando
+ *    não há mais nada se mexendo na tela — e ele conta o tempo do SERVIDOR
+ *    (`dispatched_at`), não o de quando a aba foi aberta: recarregar a página
+ *    não zera a conta.
+ */
+function AguardandoOServidor({
+  dispatchedAt,
+  destino,
+}: {
+  dispatchedAt: string | undefined;
+  destino: string;
+}) {
+  const t = useT();
+  // Um segundo, e não os 5s do poll: o poll traz dado do servidor, este tique
+  // só faz o relógio andar. Sem ele o número saltaria de 5 em 5 segundos.
+  const [agora, setAgora] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setAgora(Date.now()), 1_000);
+    return () => clearInterval(id);
+  }, []);
+
+  const inicio = dispatchedAt ? Date.parse(dispatchedAt) : NaN;
+  const segundos = Number.isNaN(inicio) ? null : Math.max(0, Math.floor((agora - inicio) / 1000));
+
+  return (
+    <Layout titulo={t("Pedido enviado — esperando o servidor pegar")}>
+      <p className="text-sm">
+        {t("Anotei o pedido de atualizar para a versão")} <strong>{destino}</strong>.{" "}
+        {t(
+          "O servidor confere se há algo a fazer de poucos em poucos minutos, então a atualização pode levar até cerca de cinco minutos para começar.",
+        )}
+      </p>
+      <p className="mt-3 text-sm">
+        <strong>{t("Esta tela ficar parada nesse tempo é normal")}</strong>
+        {t(" — ela se mexe sozinha assim que o servidor começar.")}
+      </p>
+      {segundos !== null && (
+        <p className="mt-3 text-sm tabular-nums text-muted-foreground" data-testid="espera-decorrida">
+          {t("Esperando há")} {formataEspera(segundos)}.
+        </p>
+      )}
+      <p className="mt-3 text-sm text-muted-foreground">
+        {t("Pode fechar esta página: o pedido já está registrado e não se perde.")}
+      </p>
+    </Layout>
+  );
+}
+
+/** "43 segundos" / "2 min 05 s" — sem biblioteca, e sem virar "0:5". */
+function formataEspera(segundos: number): string {
+  if (segundos < 60) return `${segundos} s`;
+  const min = Math.floor(segundos / 60);
+  return `${min} min ${String(segundos % 60).padStart(2, "0")} s`;
 }
 
 function BotaoAtualizar({

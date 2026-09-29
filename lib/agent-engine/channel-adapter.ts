@@ -39,7 +39,13 @@ export interface ChannelSendInput {
     language: string;
     /** Valor por slot, chaveado por `slotKey` — a mesma chave da tela. */
     values: Record<string, string>;
-  };
+  };  /**
+   * Presente = este envio é uma IMAGEM já guardada no Storage da conversa, e o
+   * `body` é a legenda (pode ser vazio). Hoje só a foto do catálogo usa
+   * (`agent/fotos-do-produto.ts`). Caminho, nunca URL nem bytes: quem assina a
+   * URL curta para o canal é o handler de mensagens, como em toda mídia.
+   */
+  media?: { storagePath: string; mime: string };
 }
 
 /**
@@ -105,6 +111,20 @@ export interface ChannelAdapter {
    * canal direto — a implementação lê o espelho durável do watchdog (F2-14).
    */
   sessionHealth(channelSessionId: string): Promise<ChannelSessionHealth>;
+  /**
+   * Acende o "digitando…" na conversa, antes da 1ª mensagem do turno.
+   *
+   * OPCIONAL de propósito, por duas razões distintas. A primeira é de canal:
+   * nem todo canal tem indicador de presença, e quem chama testa a presença do
+   * método em vez de perguntar qual é. A segunda é de compatibilidade: os
+   * dublês de `ChannelAdapter` espalhados pelos testes não precisam ganhar um
+   * método por causa de um enfeite.
+   *
+   * Sinalizar é decoração — a espera proporcional que a acompanha
+   * (`agent/atraso-humano.ts`) é o que conserta o "responde rápido demais".
+   * Um canal sem presença ainda recebe o conserto inteiro menos o indicador.
+   */
+  signalTyping?(input: { tenantId: string; conversationId: string }): Promise<void>;
   /** o que o canal suporta agora (estático por canal na v1). */
   capabilities(): ChannelCapabilities;
   /** custo por mensagem do canal. */

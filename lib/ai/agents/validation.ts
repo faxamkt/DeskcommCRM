@@ -49,19 +49,57 @@ const triggerConfigSchema = z
 
 export type TriggerConfig = z.infer<typeof triggerConfigSchema>;
 
+const HHMM = /^([01][0-9]|2[0-3]):[0-5][0-9]$/;
+
+/**
+ * Janela PROATIVA do follow-up. O fuso não é configurável aqui: quem executa
+ * sempre usa `organizations.timezone`, para a faixa acompanhar o relógio da
+ * empresa e não o knob anti-ban do número.
+ */
+const followupSendWindowSchema = z
+  .object({
+    start: z.string().regex(HHMM),
+    end: z.string().regex(HHMM),
+    weekdays: z.array(z.number().int().min(0).max(6)).min(1).max(7),
+  })
+  .strict()
+  .refine((window) => window.end > window.start, {
+    path: ["end"],
+    message: "followup_window_end_must_be_after_start",
+  });
+
 // Task 7.2 — vínculo do agente com fluxos de follow-up publicados. Aditivo:
 // `.default(...)` faz agents/versions existentes (sem este campo no payload)
 // continuarem válidos, lidos com enabled=false/[] (comportamento inalterado).
 // `flow_pointer_ids` referencia `followup_flow_pointers.id` — sem FK real de
 // array no Postgres (mesma doutrina de `tool_ids`: domínio validado em app,
 // não em constraint de banco).
-const followupConfigSchema = z
+//
+// #490 acrescenta `send_window`: `null` preserva o comportamento histórico; uma
+// faixa limita SOMENTE envios proativos, sem tocar o horário do inbound.
+const followupConfigObjectSchema = z
   .object({
     enabled: z.boolean().default(false),
     flow_pointer_ids: z.array(UUID).max(20).default([]),
+    send_window: followupSendWindowSchema.nullable().optional().default(null),
+    callback_enabled: z.boolean().optional(),
   })
-  .strict()
-  .default({ enabled: false, flow_pointer_ids: [] });
+  .strict();
+
+const followupConfigSchema = followupConfigObjectSchema.default({
+  enabled: false,
+  flow_pointer_ids: [],
+  send_window: null,
+});
+
+const followupPatchSchema = followupConfigObjectSchema
+  .extend({
+    enabled: followupConfigObjectSchema.shape.enabled.removeDefault(),
+    flow_pointer_ids: followupConfigObjectSchema.shape.flow_pointer_ids.removeDefault(),
+    send_window: followupConfigObjectSchema.shape.send_window.removeDefault(),
+    callback_enabled: followupConfigObjectSchema.shape.callback_enabled,
+  })
+  .partial();
 
 export type FollowupConfig = z.infer<typeof followupConfigSchema>;
 
@@ -99,7 +137,22 @@ const versionShapeSchema = z
         { message: "tool_id_invalid" },
       ),
     trigger_config: triggerConfigSchema.optional(),
-    channel_session_id: UUID,
+    /**
+     * Por qual número o agente atende. `null` = AINDA NÃO ESCOLHIDO.
+     *
+     * Era UUID obrigatório, e isso trancava o caminho mais comum de uma
+     * instalação nova: o dono escreve o prompt do atendente ANTES de conectar o
+     * WhatsApp (pareia o aparelho outro dia, com o celular na mão). Sem número
+     * em `channel_sessions`, o editor não deixava salvar uma linha do que ele
+     * acabou de escrever — a tela exigia escolher de uma lista vazia.
+     *
+     * ⚠️ NULO RASCUNHA, NÃO ATENDE. Publicar sem número continua recusado, e em
+     * três camadas independentes: `bloqueioDePublicacao` desabilita o botão,
+     * `fn_publish_ai_agent_version` levanta `channel_session_not_found` (o
+     * `select` por `channel_session_id` nulo não acha linha), e o runtime resolve
+     * o agente por `published_version_id` — sem publicação, ninguém o executa.
+     */
+    channel_session_id: UUID.nullable(),
     max_steps: z.number().int().min(1).max(25).default(10),
     token_budget: z.number().int().min(1000).max(500000).default(50000),
     cost_budget_cents: z.number().int().min(1).max(10000).default(50),
@@ -110,6 +163,7 @@ const versionShapeSchema = z
       .max(20)
       .default(["falar com humano", "atendente", "pessoa real"]),
     handoff_tool_enabled: z.boolean().default(true),
+    proposal_ai_draft_enabled: z.boolean().default(true),
     cases_enabled: z.boolean().default(false),
     // Onda 4 — quebra a resposta em bolhas curtas (splitIntoBubbles) espaçadas
     // pelo pacing anti-ban. Defaults espelham a migration 0059.
@@ -170,8 +224,29 @@ export type VersionInput = z.infer<typeof versionShapeSchema>;
 
 export const versionCreateSchema = versionShapeSchema;
 
-/** Edits permitted only on draft versions. All fields optional. */
-export const versionPatchSchema = versionShapeSchema.partial();
+/** Edits permitted only on draft versions. Omitted fields never receive create defaults. */
+export const versionPatchSchema = versionShapeSchema
+  .extend({
+    tool_ids: versionShapeSchema.shape.tool_ids.removeDefault(),
+    max_steps: versionShapeSchema.shape.max_steps.removeDefault(),
+    token_budget: versionShapeSchema.shape.token_budget.removeDefault(),
+    cost_budget_cents: versionShapeSchema.shape.cost_budget_cents.removeDefault(),
+    history_message_window: versionShapeSchema.shape.history_message_window.removeDefault(),
+    history_token_window: versionShapeSchema.shape.history_token_window.removeDefault(),
+    handoff_keywords: versionShapeSchema.shape.handoff_keywords.removeDefault(),
+    handoff_tool_enabled: versionShapeSchema.shape.handoff_tool_enabled.removeDefault(),
+    proposal_ai_draft_enabled: versionShapeSchema.shape.proposal_ai_draft_enabled.removeDefault(),
+    cases_enabled: versionShapeSchema.shape.cases_enabled.removeDefault(),
+    split_messages: versionShapeSchema.shape.split_messages.removeDefault(),
+    split_max_chars: versionShapeSchema.shape.split_max_chars.removeDefault(),
+    followup: followupPatchSchema,
+    operator_enabled: versionShapeSchema.shape.operator_enabled.removeDefault(),
+    operator_model: versionShapeSchema.shape.operator_model.removeDefault(),
+    operator_tool_ids: versionShapeSchema.shape.operator_tool_ids.removeDefault(),
+    pipeline_ids: versionShapeSchema.shape.pipeline_ids.removeDefault(),
+    knowledge_source_ids: versionShapeSchema.shape.knowledge_source_ids.removeDefault(),
+  })
+  .partial();
 
 export const agentMcpCreateSchema = z
   .object({

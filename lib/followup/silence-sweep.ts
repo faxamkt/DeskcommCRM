@@ -13,25 +13,66 @@ import { StaleServiceBoundaryError, parseServiceBoundary, assertCurrentServiceBo
  * Fluxo por tick: acha pointers `status='active'` com `trigger_config.kind=
  * 'silence'` (de TODAS as orgs — mesmo design cross-org do
  * `fn_claim_due_followup_enrollments`) → GATEIA cada um via
- * `isPointerEnabledForAutomaticTrigger` (Task 7.2 — só enrolla se algum
- * agente PUBLICADO da org tem esse pointer habilitado) → acha contatos
- * silenciosos da org (sem inbound há >= threshold_minutes) → cria 1
- * enrollment por (pointer, contato) qualificado, nascendo no nó `trigger` do
- * grafo pinado com `next_eval_at=now`. Como `runSilenceSweep` roda DEPOIS de
- * `runFollowupTick` no MESMO tick do cron (route.ts), esse enrollment recém-
- * criado só é reclamado no PRÓXIMO tick (~1min depois), não neste.
+ * `decidirAgenteDoEnrollmentAutomatico` (grafo que pede IA só enrolla se
+ * algum agente PUBLICADO da org arma o pointer; texto fixo segue com
+ * `agent_id` nulo) → acha contatos silenciosos da org (sem inbound há >=
+ * threshold_minutes) → cria 1 enrollment por (pointer, contato) qualificado,
+ * nascendo no nó `trigger` do grafo pinado com `next_eval_at=now`. Como
+ * `runSilenceSweep` roda DEPOIS de `runFollowupTick` no MESMO tick do cron
+ * (route.ts), esse enrollment recém-criado só é reclamado no PRÓXIMO tick
+ * (~1min depois), não neste.
  *
  * Idempotência + exclusividade: o índice único `idx_followup_enrollments_one_live`
  * é ORG-WIDE `(organization_id, contact_id)` (migration 0062, Task 8.6) — um
  * contato já vivo em QUALQUER fluxo da org barra novo enrollment (1 follow-up
  * vivo por lead), 23505 vira skip silencioso (`insertEnrollment` devolve
  * `inserted:false`), nunca erro. Um contato que COMPLETOU ou foi cancelado
- * pode ser re-enrollado na varredura seguinte se continuar silencioso —
- * aceitável no MVP, sem cooldown table.
+ * pode ser re-enrollado na varredura seguinte se continuar silencioso — e É
+ * ISSO QUE O COOLDOWN ABAIXO LIMITA.
  *
- * agent_id: cada pointer é gateado por `resolveAgentForAutomaticTrigger`, que
- * devolve o agente publicado que ARMA o pointer (menor uuid se >1) — esse
- * agent_id é PINADO no enrollment (persona + exibição na fila). `null` = gate-out.
+ * ─── Cooldown pós-conclusão (issue reportada em produção, 2026-09-25) ───────
+ *
+ * Esta linha dizia "aceitável no MVP, sem cooldown table" — e o "aceitável"
+ * presumia que o intervalo entre tentativas seguiria sendo, na pior das
+ * hipóteses, próximo do `threshold_minutes` configurado. Não é: o cron roda a
+ * CADA MINUTO (`docker/scheduler/entrypoint.sh`), e como o contato que nunca
+ * responde permanece "silencioso" para sempre (nada atualiza
+ * `last_inbound_at`), a varredura seguinte reinscreve assim que o enrollment
+ * anterior sai de `active`/`waiting_reply` — não depois de outro
+ * `threshold_minutes`. Medido numa instalação real: um pointer "Triagem
+ * parada" com `threshold_minutes: 120` reinscreveu o MESMO contato 32 vezes
+ * em ~9 horas, a cada ~3 minutos (o tempo de vida de um enrollment de um nó
+ * só), não a cada 2 horas — risco de banimento por spam no WhatsApp.
+ *
+ * O conserto reusa o MESMO `cutoffIso` já calculado para "está silencioso":
+ * um contato só é elegível de novo se NENHUM enrollment TERMINADO deste
+ * pointer para ele tiver sido concluído depois desse corte — ou seja, precisa
+ * ter passado o `threshold_minutes` inteiro desde que a ÚLTIMA tentativa
+ * (completed, cancelled ou dead) TERMINOU, não desde que ela começou.
+ *
+ * ⚠️ Duas armadilhas que a primeira versão deste conserto tinha (achadas em
+ * revisão, antes de qualquer instalação real ver o defeito):
+ *
+ *  1. Ancorar em `started_at` em vez do fim da tentativa. Um nó `wait` do
+ *     grafo aceita de 5 minutos a 90 dias (`graph-schema.ts`) — um fluxo cujo
+ *     tempo total de execução passa do `threshold_minutes` do pointer já teria
+ *     `started_at` fora da janela no momento em que finalmente termina, e a
+ *     PRÓXIMA varredura (≤1min depois) reinscreveria na hora — reproduzindo o
+ *     defeito original para qualquer fluxo mais lento que o de hoje. A âncora
+ *     certa é `updated_at` de um enrollment TERMINAL (o mesmo commit que grava
+ *     `completed_at` sempre regrava `updated_at` junto — `engine.ts` linhas
+ *     301-302 e 576 — então não precisa de `coalesce`).
+ *  2. Não excluir os status VIVOS (`active`, `waiting_reply`, `paused_handoff`,
+ *     `paused_manual` — o mesmo conjunto do índice único
+ *     `idx_followup_enrollments_one_live`) da consulta de cooldown. Um
+ *     enrollment ainda em andamento SEMPRE bateria no filtro (acabou de
+ *     começar), e passaria a contar como `skipped_cooldown` em vez do
+ *     `skipped_existing` que o índice único já garante via 23505 — trocando o
+ *     que cada contador mede sem nenhuma mudança de comportamento real.
+ *
+ * agent_id: `decidirAgenteDoEnrollmentAutomatico` pina o agente publicado que
+ * ARMA o pointer (menor uuid se >1). Grafo só de texto fixo nasce com
+ * `agent_id` nulo. Grafo que pede IA sem agente é gate-out.
  *
  * `segments`: única primitiva de segmentação já modelada no schema é
  * `contacts.tags` (GIN index `idx_contacts_tags_gin` já existe) — interpretado
@@ -46,9 +87,25 @@ import {
   montarEstadoDeElegibilidade,
   ttlDaAutorizacaoMs,
 } from "@/lib/ai/elegibilidade/gate";
+import { logger } from "@/lib/logger";
+
 import { flowGraphSchema } from "./graph-schema";
 import { triggerConfigSchema } from "./api-schemas";
-import { resolveAgentForAutomaticTrigger, type FollowupGateDb } from "./agent-followup-gate";
+import {
+  decidirAgenteDoEnrollmentAutomatico,
+  noDeGatilhoDoGrafo,
+  type FollowupGateDb,
+  type NoDeGatilho,
+} from "./agent-followup-gate";
+import { contatosComRetornoVivo } from "./retorno-segura-o-fluxo";
+
+/**
+ * Status que ocupam a vaga do índice único `idx_followup_enrollments_one_live`
+ * — mesma lista usada em `gatilho-retorno.ts`, `gatilho-caso.ts` e
+ * `ceder-turno-ao-retorno.ts` (não há constante exportada compartilhada; cada
+ * consumidor já repete a própria cópia).
+ */
+const STATUS_VIVOS = ["active", "waiting_reply", "paused_handoff", "paused_manual"] as const;
 
 export interface SilencePointer {
   id: string;
@@ -64,8 +121,29 @@ export interface SilenceSweepDb {
   loadActiveSilencePointers(): Promise<SilencePointer[]>;
   /** Contact ids da org sem inbound desde `cutoffIso` (inclusive); `segments` vazio = todos. */
   loadSilentContactIds(orgId: string, cutoffIso: string, segments: string[]): Promise<string[]>;
-  /** id do nó `trigger` do grafo pinado da version; `null` se version/nó não existir (defensivo — não deveria acontecer, validate-publish garante 1 trigger). */
-  loadTriggerNodeId(orgId: string, versionId: string): Promise<string | null>;
+  /**
+   * Contatos com RETORNO agendado vivo — quem tem um "te escrevo no dia 30" a
+   * caminho não entra no fluxo de silêncio. Ver `retorno-segura-o-fluxo.ts`.
+   */
+  loadContatosComRetornoVivo(orgId: string): Promise<Set<string>>;
+  /** Nó `trigger` do grafo pinado + se o fluxo pede agente; `null` se version/nó não existir. */
+  loadTriggerNode(orgId: string, versionId: string): Promise<NoDeGatilho | null>;
+  /**
+   * Dentre `contactIds`, quais têm um enrollment TERMINAL (completed,
+   * cancelled ou dead) deste pointer CONCLUÍDO depois de `cutoffIso` — ainda
+   * em cooldown, não podem ser reinscritos agora. Enrollment VIVO
+   * (active/waiting_reply/paused_handoff/paused_manual) fica de fora de
+   * propósito: esse caso já é barrado pelo índice único
+   * `idx_followup_enrollments_one_live` via `insertEnrollment` → 23505 →
+   * `skipped_existing`; incluí-lo aqui trocaria o que os dois contadores
+   * medem sem mudar nenhum comportamento real.
+   */
+  loadContactIdsEmCooldown(
+    orgId: string,
+    pointerId: string,
+    contactIds: string[],
+    cutoffIso: string,
+  ): Promise<Set<string>>;
   /** Insere o enrollment nascendo no nó trigger; `inserted:false` = 23505 (já vivo nesse pointer) → skip. */
   insertEnrollment(input: {
     organization_id: string;
@@ -83,6 +161,16 @@ export interface SilenceSweepSummary {
   pointers_gated_out: number;
   enrolled: number;
   skipped_existing: number;
+  /** Elegível por silêncio, mas com tentativa deste pointer iniciada há menos de `threshold_minutes` — ver o cooldown no cabeçalho do arquivo. */
+  skipped_cooldown: number;
+  /** Silenciosos que ficaram de fora porque já têm um retorno agendado. */
+  skipped_pending_return: number;
+  /**
+   * Pointers que FALHARAM nesta varredura (logados e pulados). Um pointer ruim
+   * — de uma empresa só — não pode calar a varredura de todas as outras: antes,
+   * a primeira exceção abortava o laço e nenhum pointer depois dele era varrido.
+   */
+  pointers_failed: number;
 }
 
 export interface SilenceSweepDeps {
@@ -98,53 +186,88 @@ export async function runSilenceSweep(deps: SilenceSweepDeps): Promise<SilenceSw
     pointers_gated_out: 0,
     enrolled: 0,
     skipped_existing: 0,
+    skipped_cooldown: 0,
+    skipped_pending_return: 0,
+    pointers_failed: 0,
   };
 
   const pointers = await db.loadActiveSilencePointers();
   summary.pointers_scanned = pointers.length;
 
-  // Memoiza a resolução do agente por pointer dentro desta varredura — nada
-  // impede 2 pointers silence na mesma org, e a query do gate já é 1 por org
-  // (não precisa repetir). `null` = gate-out (nenhum agente publicado arma o
-  // pointer); qualquer agent_id = habilitado E já pinado (o mesmo id que vai
-  // pro enrollment). Colapsa gate + pick numa chamada só (Task 8.6).
-  const agentCache = new Map<string, Promise<string | null>>();
-  const resolveAgent = (orgId: string, pointerId: string): Promise<string | null> => {
-    const key = `${orgId}:${pointerId}`;
+  // Memoiza a decisão do agente por pointer nesta varredura. A query do gate
+  // é 1 por org; o grafo diz se a ausência de agente é gate-out ou `agent_id`
+  // nulo (texto fixo).
+  const agentCache = new Map<string, Promise<{ agentId: string | null; barrado: boolean }>>();
+  const decidirAgente = (
+    orgId: string,
+    pointerId: string,
+    pedeAgente: boolean,
+  ): Promise<{ agentId: string | null; barrado: boolean }> => {
+    const key = `${orgId}:${pointerId}:${pedeAgente ? "1" : "0"}`;
     let hit = agentCache.get(key);
     if (!hit) {
-      hit = resolveAgentForAutomaticTrigger(gateDb, orgId, pointerId);
+      hit = decidirAgenteDoEnrollmentAutomatico(gateDb, orgId, pointerId, pedeAgente);
       agentCache.set(key, hit);
     }
     return hit;
   };
 
   for (const pointer of pointers) {
-    const agentId = await resolveAgent(pointer.organization_id, pointer.id);
-    if (agentId === null) {
-      summary.pointers_gated_out++;
-      continue;
-    }
+    try {
+      const trigger = await db.loadTriggerNode(pointer.organization_id, pointer.active_version_id);
+      if (!trigger) continue;
 
-    const triggerNodeId = await db.loadTriggerNodeId(pointer.organization_id, pointer.active_version_id);
-    if (!triggerNodeId) continue;
+      const { agentId, barrado } = await decidirAgente(
+        pointer.organization_id,
+        pointer.id,
+        trigger.pedeAgente,
+      );
+      if (barrado) {
+        summary.pointers_gated_out++;
+        continue;
+      }
 
-    const cutoffIso = new Date(clock().getTime() - pointer.threshold_minutes * 60_000).toISOString();
-    const contactIds = await db.loadSilentContactIds(pointer.organization_id, cutoffIso, pointer.segments);
-    const nextEvalAt = clock().toISOString();
+      const cutoffIso = new Date(clock().getTime() - pointer.threshold_minutes * 60_000).toISOString();
+      const contactIds = await db.loadSilentContactIds(pointer.organization_id, cutoffIso, pointer.segments);
+      if (contactIds.length === 0) continue;
 
-    for (const contactId of contactIds) {
-      const { inserted } = await db.insertEnrollment({
+      const emCooldown = await db.loadContactIdsEmCooldown(
+        pointer.organization_id,
+        pointer.id,
+        contactIds,
+        cutoffIso,
+      );
+      const nextEvalAt = clock().toISOString();
+      const comRetorno = await db.loadContatosComRetornoVivo(pointer.organization_id);
+
+      for (const contactId of contactIds) {
+        if (comRetorno.has(contactId)) {
+          summary.skipped_pending_return++;
+          continue;
+        }
+        if (emCooldown.has(contactId)) {
+          summary.skipped_cooldown++;
+          continue;
+        }
+        const { inserted } = await db.insertEnrollment({
+          organization_id: pointer.organization_id,
+          pointer_id: pointer.id,
+          version_id: pointer.active_version_id,
+          contact_id: contactId,
+          current_node_id: trigger.id,
+          next_eval_at: nextEvalAt,
+          agent_id: agentId,
+        });
+        if (inserted) summary.enrolled++;
+        else summary.skipped_existing++;
+      }
+    } catch (err) {
+      summary.pointers_failed++;
+      logger.warn("[silence-sweep] pointer falhou — pulado; os demais seguem", {
         organization_id: pointer.organization_id,
         pointer_id: pointer.id,
-        version_id: pointer.active_version_id,
-        contact_id: contactId,
-        current_node_id: triggerNodeId,
-        next_eval_at: nextEvalAt,
-        agent_id: agentId,
+        error: (err instanceof Error ? err.message : String(err)).slice(0, 160),
       });
-      if (inserted) summary.enrolled++;
-      else summary.skipped_existing++;
     }
   }
 
@@ -167,7 +290,7 @@ export function createSupabaseSilenceSweepDb(admin: SupabaseClient): SilenceSwee
     async loadActiveSilencePointers() {
       const { data, error } = await admin
         .from("followup_flow_pointers")
-        .select("id, organization_id, active_version_id, trigger_config")
+        .select("id, organization_id, active_version_id, trigger_config, surface")
         .eq("status", "active")
         .not("active_version_id", "is", null);
       if (error) throw new Error(error.message);
@@ -178,8 +301,11 @@ export function createSupabaseSilenceSweepDb(admin: SupabaseClient): SilenceSwee
         organization_id: string;
         active_version_id: string | null;
         trigger_config: unknown;
+        surface?: string | null;
       }>) {
-        if (!row.active_version_id) continue;
+        // Roteiro de atendimento (0394) é do turno, nunca do relógio: o banco
+        // já o prende em gatilho manual, e este corte é a segunda porta.
+        if (!row.active_version_id || row.surface === "atendimento") continue;
         const parsed = triggerConfigSchema.safeParse(row.trigger_config);
         if (!parsed.success || parsed.data.kind !== "silence") continue;
         pointers.push({
@@ -203,7 +329,7 @@ export function createSupabaseSilenceSweepDb(admin: SupabaseClient): SilenceSwee
       // que encerrou a conversa não deveria ver um follow-up automático chegar
       // depois. Sem isto, o sweep contava `last_inbound_at` de QUALQUER
       // conversa, inclusive uma que um humano já fechou de propósito — medido
-      // ao desenhar o primeiro fluxo de silêncio real (tenant YADEA): o gatilho
+      // ao desenhar o primeiro fluxo de silêncio real (num tenant de produção): o gatilho
       // só faz sentido enquanto "o fluxo da conversa ainda está ativo".
       const { data, error } = await admin
         .from("conversations")
@@ -286,7 +412,11 @@ export function createSupabaseSilenceSweepDb(admin: SupabaseClient): SilenceSwee
       return silentIds;
     },
 
-    async loadTriggerNodeId(orgId, versionId) {
+    loadContatosComRetornoVivo(orgId) {
+      return contatosComRetornoVivo(admin, orgId);
+    },
+
+    async loadTriggerNode(orgId, versionId) {
       const { data, error } = await admin
         .from("followup_flow_versions")
         .select("graph")
@@ -295,8 +425,21 @@ export function createSupabaseSilenceSweepDb(admin: SupabaseClient): SilenceSwee
         .maybeSingle();
       if (error) throw new Error(error.message);
       if (!data) return null;
-      const graph = flowGraphSchema.parse(data.graph);
-      return graph.nodes.find((n) => n.type === "trigger")?.id ?? null;
+      return noDeGatilhoDoGrafo(flowGraphSchema.parse(data.graph));
+    },
+
+    async loadContactIdsEmCooldown(orgId, pointerId, contactIds, cutoffIso) {
+      if (contactIds.length === 0) return new Set();
+      const { data, error } = await admin
+        .from("followup_enrollments")
+        .select("contact_id")
+        .eq("organization_id", orgId)
+        .eq("pointer_id", pointerId)
+        .in("contact_id", contactIds)
+        .not("status", "in", `(${STATUS_VIVOS.join(",")})`)
+        .gte("updated_at", cutoffIso);
+      if (error) throw new Error(error.message);
+      return new Set((data ?? []).map((row: { contact_id: string }) => row.contact_id));
     },
 
     async insertEnrollment(input) {

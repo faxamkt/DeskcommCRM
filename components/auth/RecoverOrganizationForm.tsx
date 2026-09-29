@@ -18,8 +18,18 @@ const MENSAGENS: Record<string, string> = {
   rate_limited: "Muitas tentativas. Aguarde alguns minutos antes de tentar novamente.",
   invite_pending:
     "Esta conta tem um convite pendente ou inválido. Use o link do convite ou peça um novo ao administrador.",
+  somente_convite:
+    "Esta instalação aceita cadastro apenas por convite. Peça um convite a quem administra o sistema.",
   provision_failed:
     "Não foi possível concluir a organização agora. Tente novamente ou contate o administrador da instalação.",
+  // Diz a verdade sobre o que aconteceu. Antes, quem tinha o acesso revogado
+  // recebia a frase de `invite_pending` — por acaso, porque o convite ainda
+  // estava no `user_metadata` — e ia procurar um link de convite que não
+  // resolveria nada.
+  access_revoked:
+    "Seu acesso a esta organização foi retirado. Fale com quem administra a empresa — criar uma organização nova não devolve o acesso.",
+  pedido_recusado:
+    "Quem administra esta instalação não aprovou o pedido. Se você recebeu um convite, use o link que chegou no seu e-mail.",
 };
 
 /**
@@ -30,7 +40,14 @@ const MENSAGENS: Record<string, string> = {
  * recuperação precisa digitar de novo um dado que o sistema já tem, no momento
  * em que ela está mais propensa a desistir.
  */
-export function RecoverOrganizationForm({ nomeSugerido }: { nomeSugerido?: string }) {
+export function RecoverOrganizationForm({
+  nomeSugerido,
+  comAprovacao = false,
+}: {
+  nomeSugerido?: string;
+  /** Instalação em `com_aprovacao`: o envio vira pedido, e o botão diz isso. */
+  comAprovacao?: boolean;
+}) {
   const t = useT();
   const [name, setName] = useState(nomeSugerido ?? "");
   const [error, setError] = useState<string | null>(null);
@@ -41,7 +58,8 @@ export function RecoverOrganizationForm({ nomeSugerido }: { nomeSugerido?: strin
     setError(null);
     startTransition(async () => {
       const result = await recoverOrganization(name);
-      // O caminho de sucesso não volta: a action redireciona para o onboarding.
+      // O caminho de sucesso não volta: a action redireciona (onboarding, ou a
+      // própria tela mostrando o pedido enviado).
       if (!result.ok) setError(t(MENSAGENS[result.error] ?? MENSAGENS.provision_failed!));
     });
   }
@@ -66,7 +84,11 @@ export function RecoverOrganizationForm({ nomeSugerido }: { nomeSugerido?: strin
         </p>
       )}
       <Button className="w-full" type="submit" disabled={isPending || name.trim().length < 2}>
-        {isPending ? t("Preparando seu ambiente…") : t("Continuar para o onboarding")}
+        {isPending
+          ? t("Preparando seu ambiente…")
+          : comAprovacao
+            ? t("Enviar pedido")
+            : t("Continuar para o onboarding")}
       </Button>
     </form>
   );

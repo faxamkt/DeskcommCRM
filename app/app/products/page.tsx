@@ -1,14 +1,18 @@
+import type { Metadata } from "next";
 import { redirect } from "next/navigation";
 
 import { requireAuth, resolveActiveOrg } from "@/lib/auth/server";
 import { ROLE_RANK } from "@/lib/auth/types";
+import { BUCKET_DAS_FOTOS, fotoPertenceAoProduto } from "@/lib/catalogo/fotos";
 import { traduzir } from "@/lib/i18n/dicionario";
 import { COLUNAS_DO_PRODUTO, type Produto } from "@/lib/schemas/produtos";
+import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 
 import { ProdutosClient } from "./_client";
 
 export const dynamic = "force-dynamic";
+export const metadata: Metadata = { title: "Produtos" };
 
 /**
  * O CATÁLOGO DA LOJA — onde o preço que a IA responde é cadastrado.
@@ -43,10 +47,28 @@ export default async function ProdutosPage() {
     .order("ativo", { ascending: false })
     .order("nome")
     .limit(500);
+  const produtos = (data ?? []) as unknown as Produto[];
+
+  // O bucket é privado: a tela recebe URL assinada de 1 h, montada aqui. Só
+  // caminho que é DO produto (ver `fotoPertenceAoProduto`) — a assinatura é
+  // por service role, e a linha é gravável pelo PostgREST.
+  const caminhos = produtos.flatMap((p) =>
+    (p.fotos ?? []).filter((c) => fotoPertenceAoProduto(c, activeOrg.orgId, p.id)),
+  );
+  const urlsDasFotos: Record<string, string> = {};
+  if (caminhos.length > 0) {
+    const { data: assinadas } = await createAdminClient()
+      .storage.from(BUCKET_DAS_FOTOS)
+      .createSignedUrls(caminhos, 3600);
+    for (const a of assinadas ?? []) {
+      if (a.path && a.signedUrl) urlsDasFotos[a.path] = a.signedUrl;
+    }
+  }
 
   return (
     <ProdutosClient
-      inicial={(data ?? []) as unknown as Produto[]}
+      inicial={produtos}
+      urlsDasFotos={urlsDasFotos}
       podeEditar={podeEditar}
       textos={{
         titulo: t("Produtos"),

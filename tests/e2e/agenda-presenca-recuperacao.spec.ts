@@ -8,7 +8,7 @@ import { randomInt, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { createClient } from "@supabase/supabase-js";
-import { test, expect, type Page, type TestInfo } from "@playwright/test";
+import { test, expect, type Page, type TestInfo } from "./helpers/test";
 import { credenciaisSupabaseDeTeste } from "../../scripts/lib/env-de-teste";
 import { escolherDiaDesenhado, irParaASemanaSeguinte } from "./helpers/agenda-semana-integra";
 import { enviarTextoFixoPendente } from "../../lib/followup/enviar-texto-fixo";
@@ -142,8 +142,19 @@ async function login(page: Page, email: string) {
   await page.goto("/login");
   await page.getByLabel(/e-?mail/i).fill(email);
   await page.getByLabel(/senha/i).fill(password);
-  await page.getByRole("button", { name: /entrar/i }).click();
+  await page.getByRole("button", { name: "Entrar", exact: true }).click();
   await page.waitForURL(/\/app(?:\/|$)/, { timeout: 60000 });
+}
+// O radar só pinta as listas depois que a tela busca /api/v1/leads/at-risk, e
+// no CI essa resposta levou ~3,9 s nas duas falhas medidas (#1879), disputando o
+// servidor com os prefetches do menu. O `expect` de 5 s começava junto com a
+// busca e perdia a corrida por ~1 s. Espera-se o EVENTO (a resposta), não um prazo.
+async function abrirRadar(page: Page) {
+  const carregou = page.waitForResponse(
+    (r) => new URL(r.url()).pathname === "/api/v1/leads/at-risk" && r.request().method() === "GET",
+  );
+  await page.goto("/app/radar");
+  expect((await carregou).status()).toBe(200);
 }
 async function detail(page: Page, id: string, title: string) {
   await page.goto(`/app/agenda?compromisso=${id}`);
@@ -286,7 +297,7 @@ test("Inbox marca cliente/conversa; detalhe antigo confirma presença com evidê
   await page.getByRole("link", { name: "Marcar compromisso", exact: true }).click();
   const panel = page.getByTestId("painel-de-marcacao");
   await expect(panel).toBeVisible();
-  await expect(page.getByLabel("Quem será atendido")).toHaveValue(p.contact);
+  await expect(page.getByTestId("quem-sera-atendido")).toHaveAttribute("data-contact-id", p.contact);
   await expect(page.getByLabel("Conversa vinculada (opcional)")).toHaveValue(p.conversation);
   // Fecha o painel para navegar a grade; reabre pela mesma entrada contextual.
   await page.keyboard.press("Escape");
@@ -464,6 +475,41 @@ test.describe("datas do compromisso seguem idioma e fuso próprios", () => {
   });
 });
 
+test("ir para a Agenda pelo menu apaga o cliente da conversa — \"Novo agendamento\" não herda", async ({
+  page,
+}) => {
+  // ⛔ O DEFEITO RELATADO (instalação real, 2026-09-12): "Novo agendamento"
+  // abria com um contato JÁ selecionado, herdado de uma abertura anterior
+  // feita a partir da conversa dele. Quem não reparasse marcaria o compromisso
+  // no nome de outra pessoa — o campo parece preenchido de propósito.
+  //
+  // ⚠️ O gesto tem de ser a NAVEGAÇÃO PELO MENU, não `page.goto`: recarregar a
+  // página remonta o componente e zeraria o estado por acidente, verdejando o
+  // teste com o defeito de pé. `/app/agenda?contato=…` e `/app/agenda` são a
+  // MESMA rota do App Router — só a query muda, e é por isso que o cliente
+  // sobrevivia.
+  //
+  // O irmão desta prova é o caso acima ("Inbox marca cliente/conversa"), que
+  // exige o contrário: fechar o painel para navegar a grade NÃO pode perder o
+  // cliente que a conversa deu. Os dois juntos são a regra inteira.
+  const f = await fixture(),
+    p = await person(f, "Cliente que não pode vazar");
+  await inbound(f, p, "Preciso marcar uma consulta");
+  await login(page, f.email);
+  await page.goto(`/app/inbox/${p.conversation}`);
+  await page.getByRole("link", { name: "Marcar compromisso", exact: true }).click();
+  await expect(page.getByTestId("painel-de-marcacao")).toBeVisible();
+  await expect(page.getByTestId("quem-sera-atendido")).toHaveAttribute("data-contact-id", p.contact);
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("painel-de-marcacao")).toBeHidden();
+
+  await page.getByRole("link", { name: "Agenda", exact: true }).first().click();
+  await expect(page).toHaveURL(/\/app\/agenda$/);
+  await page.getByRole("button", { name: /novo agendamento/i }).click();
+  await expect(page.getByTestId("painel-de-marcacao")).toBeVisible();
+  await expect(page.getByTestId("quem-sera-atendido")).toHaveValue("");
+});
+
 test("gestão configura prazos e gatilho; falta inicia uma vez e resposta interrompe", async ({
   page,
 }) => {
@@ -477,10 +523,30 @@ test("gestão configura prazos e gatilho; falta inicia uma vez e resposta interr
   await page.getByLabel("Proteger de cobranças por silêncio após o fim (minutos)").fill("120");
   await page.getByRole("button", { name: "Salvar prazos" }).click();
   await expect(page.getByText("Prazos salvos.")).toBeVisible();
-  expect(
-    (await db.from("organizations").select("settings").eq("id", f.org).single()).data?.settings
-      .agenda,
-  ).toEqual({ confirmation_delay_minutes: 15, unknown_protection_minutes: 120 });
+  // `toEqual` de propósito, e não `toMatchObject`: o que esta linha vigia é que
+  // a tela de prazos escreve EXATAMENTE as chaves que escreveu, sem carregar
+  // lixo junto. Afrouxar para "contém" deixaria passar um campo escrito por
+  // engano.
+  //
+  // A terceira chave entrou pela migration 0249 (#789) e é **opcional** por
+  // decisão escrita: organização já instalada tem `settings.agenda` com duas
+  // chaves, e exigir três quebraria o PATCH vindo de uma aba aberta antes da
+  // atualização. Ausente significa "use o default" (1440), resolvido no
+  // `agendaSettingsSchema`. Por isso ela entra aqui com o valor que a tela
+  // gravou, não como chave obrigatória do schema.
+  const agenda = (await db.from("organizations").select("settings").eq("id", f.org).single()).data
+    ?.settings.agenda;
+  expect(agenda).toEqual({
+    confirmation_delay_minutes: 15,
+    unknown_protection_minutes: 120,
+    pending_expires_after_minutes: agenda?.pending_expires_after_minutes,
+  });
+  // E o valor do terceiro prazo é o DEFAULT, não um resto de outra escrita: a
+  // tela não tem campo para ele, e quem o grava é o `.default(1440)` do
+  // `agendaSettingsWriteSchema` (`lib/schemas/settings.ts:244`) ao fazer parse do
+  // que a tela enviou. Fixar o número aqui é o que separa "a chave apareceu" de
+  // "a chave apareceu com o valor certo".
+  expect(agenda?.pending_expires_after_minutes).toBe(1440);
   await page.goto(`/app/ai/followups/${pointer}`);
   await page.getByTestId("trigger-config-button").click();
   await page.getByLabel("Tipo de gatilho").click();
@@ -1014,7 +1080,7 @@ test("Radar recorta demandas pela RLS real, além do pool frio, e preserva gest�
   };
   await policy("own");
   await login(page, members.agent!.email);
-  await page.goto("/app/radar");
+  await abrirRadar(page);
   await expect(page.getByTestId("radar-sem-proximo-passo")).toContainText("Própria fora do pool");
   const own = await read();
   expect(own.sem_proximo_passo.map((d) => d.id).sort()).toEqual(
@@ -1033,7 +1099,7 @@ test("Radar recorta demandas pela RLS real, além do pool frio, e preserva gest�
   );
   expect(unassigned.total_sem_proximo_passo).toBe(3);
   await login(page, members.manager!.email);
-  await page.goto("/app/radar");
+  await abrirRadar(page);
   await expect(page.getByTestId("radar-sem-proximo-passo")).toContainText("Órfã de gestão");
   expect((await read()).total_sem_proximo_passo).toBe(6);
   await login(page, members.viewer!.email);
@@ -1053,7 +1119,7 @@ test("Radar recorta demandas pela RLS real, além do pool frio, e preserva gest�
   await page.getByRole("button", { name: /Acompanhar/ }).click();
   await page.getByRole("button", { name: "Confirmar e entrar" }).click();
   await page.waitForURL("**/app/inbox");
-  await page.goto("/app/radar");
+  await abrirRadar(page);
   await expect(page.getByTestId("radar-sem-proximo-passo")).toContainText("Órfã de gestão");
   expect((await read()).total_sem_proximo_passo).toBe(6);
   await page.getByRole("button", { name: "Sair do acompanhamento" }).click();

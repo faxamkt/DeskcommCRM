@@ -1,4 +1,5 @@
-import { lerInterface } from "@/lib/navigation/interface";
+import { cache } from "react";
+import { combinarInterfaces } from "@/lib/navigation/interface";
 /**
  * Server-side auth helpers — load AuthUser, resolve active org, gate routes.
  *
@@ -26,11 +27,25 @@ interface RawMembershipRow {
   /** Só para ORDENAR — a lista decide qual organização fica ativa sem cookie. */
   accepted_at?: string | null;
   organizations: OrgJoin | OrgJoin[] | null;
+  /**
+   * As portas da EMPRESA, por embed PRÓPRIO (`organizations.interface_settings`,
+   * migration 0367). Ficam fora de `organizations(display_name, locale)` de
+   * propósito: aquele embed é o que a membership SEMPRE trouxe — nome e IDIOMA da
+   * empresa, lidos em toda navegação — e um jsonb novo ali faria a escolha de menu
+   * mexer no caminho de quem só precisa saber em que língua desenhar a tela.
+   */
+  interface_da_empresa: OrgJoinEmpresa | OrgJoinEmpresa[] | null;
 }
 
 interface OrgJoin {
   display_name: string;
   locale: string | null;
+  timezone: string | null;
+}
+
+/** O mesmo `organizations`, alcançado por outro embed: só as portas da EMPRESA. */
+interface OrgJoinEmpresa {
+  interface_settings?: unknown;
 }
 
 /**
@@ -104,7 +119,7 @@ export function ehSessaoAusente(error: { name?: string } | null | undefined): bo
   return error?.name === "AuthSessionMissingError";
 }
 
-export async function loadAuthUser(): Promise<AuthUser | null> {
+export const loadAuthUser = cache(async (): Promise<AuthUser | null> => {
   const supabase = await createClient();
   const {
     data: { user },
@@ -149,42 +164,36 @@ export async function loadAuthUser(): Promise<AuthUser | null> {
   }
   if (!user) return null;
 
-  // Platform admin? (active = no revoked_at). RLS returns null for non-admins.
-  //
-  // ⚠️ O erro é capturado de propósito: aqui `data: null` é AMBÍGUO — significa tanto
-  // "não é platform admin" (RLS filtrou, estado normal) quanto "a query falhou".
-  // Sem separar os dois, um banco instável rebaixa silenciosamente um super-admin.
-  const { data: paRow, error: paErro } = await supabase
-    .from("platform_admins")
-    .select("user_id, revoked_at")
-    .eq("user_id", user.id)
-    .is("revoked_at", null)
-    .maybeSingle();
-
-  // Org memberships (only active = not revoked, accepted)
+  // Platform admin e Org memberships consultados em paralelo no Supabase:
+  // elimina round-trip sequencial a cada requisição.
   // ⚠️ `ORDER BY` NÃO É ENFEITE AQUI: esta lista decide QUAL ORGANIZAÇÃO FICA
   // ATIVA para quem não tem o cookie `active_org` — `resolveActiveOrg` pega
-  // `organizations[0]`. Sem ordenação, "a primeira" é o que o Postgres devolver,
-  // e isso não é estável por especificação: muda com plano de execução, com a
-  // ordem física das linhas e com qualquer reescrita delas.
-  //
-  // O efeito para quem administra DUAS empresas na mesma instalação: entrar sem
-  // cookie (primeiro acesso, sessão nova, cookie expirado) podia cair numa ou na
-  // outra sem critério nenhum — e o produto não dava sinal de que escolheu.
-  //
-  // `accepted_at` primeiro porque a organização mais ANTIGA é a que a pessoa
-  // reconhece como "a minha"; `organization_id` como desempate, para o resultado
-  // ser determinístico mesmo quando as duas entraram no mesmo instante (é o caso
-  // de quem foi convidado para várias no mesmo lote).
-  const { data: rawMemberships, error: membErro } = await supabase
-    .from("user_organizations")
-    .select(
-      "organization_id, role, interface_settings, accepted_at, organizations(display_name, locale)",
-    )
-    .eq("user_id", user.id)
-    .is("revoked_at", null)
-    .order("accepted_at", { ascending: true, nullsFirst: true })
-    .order("organization_id", { ascending: true });
+  // `organizations[0]`. Sem ordenação, "a primeira" é o que o Postgres devolver.
+  const [{ data: paRow, error: paErro }, { data: rawMemberships, error: membErro }] =
+    await Promise.all([
+      supabase
+        .from("platform_admins")
+        .select("user_id, revoked_at")
+        .eq("user_id", user.id)
+        .is("revoked_at", null)
+        .maybeSingle(),
+      supabase
+        .from("user_organizations")
+        .select(
+          // Dois embeds do MESMO `organizations`, como manda o PostgREST quando a
+          // mesma relação aparece duas vezes: `organizations(...)` continua sendo
+          // o que a membership sempre trouxe (nome, IDIOMA e FUSO da empresa — o
+          // idioma decide a tela inteira e não pode depender de um embed que a
+          // issue #1341 acabou de engordar), e o alias traz só as portas da EMPRESA.
+          // `timezone` veio do main (fuso da organização nas listas, #1290) e convive
+          // com o alias: um embed por relação, sem renomear o que já existia.
+          "organization_id, role, interface_settings, accepted_at, organizations(display_name, locale, timezone), interface_da_empresa:organizations(interface_settings)",
+        )
+        .eq("user_id", user.id)
+        .is("revoked_at", null)
+        .order("accepted_at", { ascending: true, nullsFirst: true })
+        .order("organization_id", { ascending: true }),
+    ]);
 
   /**
    * FALHA ALTO, não baixo.
@@ -222,12 +231,18 @@ export async function loadAuthUser(): Promise<AuthUser | null> {
   const memberships: UserOrgMembership[] = rows.map((row) => {
     const orgs = row.organizations;
     const org = Array.isArray(orgs) ? (orgs[0] ?? null) : orgs;
+    const empresas = row.interface_da_empresa;
+    const empresa = Array.isArray(empresas) ? (empresas[0] ?? null) : empresas;
     return {
       organization_id: row.organization_id,
       organization_name: org?.display_name ?? "—",
       role: row.role as Role,
-      interface_settings: lerInterface(row.interface_settings).settings,
+      // EMPRESA ∩ VÍNCULO (migration 0367): a empresa escolhe o universo de
+      // portas da instalação, o vínculo escolhe menos dentro dele. Até aqui o
+      // vínculo decidia sozinho, então a escolha da empresa não existia.
+      interface_settings: combinarInterfaces(empresa?.interface_settings, row.interface_settings),
       locale: org?.locale ?? null,
+      timezone: org?.timezone ?? null,
     };
   });
 
@@ -259,14 +274,14 @@ export async function loadAuthUser(): Promise<AuthUser | null> {
     organizations: memberships,
     support,
   };
-}
+});
 
 /**
  * Resolves the active organization for the current request.
  * Priority: cookie `active_org` (if member of) → first membership.
  * Returns null if user has zero memberships.
  */
-export async function resolveActiveOrg(authUser: AuthUser): Promise<ActiveOrg | null> {
+export const resolveActiveOrg = cache(async (authUser: AuthUser): Promise<ActiveOrg | null> => {
   if (authUser.support) {
     if (authUser.support.status !== "active") redirect("/support-ended");
     return {
@@ -283,8 +298,9 @@ export async function resolveActiveOrg(authUser: AuthUser): Promise<ActiveOrg | 
     name: ativo.organization_name,
     role: ativo.role,
     interface_settings: ativo.interface_settings,
+    timezone: ativo.timezone ?? null,
   };
-}
+});
 
 /**
  * For Server Components / Server Actions in /app/(app)/* routes — guarantees
@@ -299,12 +315,20 @@ export async function requireAuth(): Promise<AuthUser> {
 /**
  * Returns true if the current session has at least one verified TOTP factor.
  * Use only in Server Components / Server Actions (cookie session).
+ *
+ * LANÇA quando não conseguiu ler os fatores. O `listFactors()` do auth-js não
+ * lança: ele chama `getUser()` pela rede e, se falhar, DEVOLVE
+ * `{ data: null, error }`. Ler só `data` transformava essa falha em "não tem
+ * fator" — e `mfaEmDivida` liberava a sessão `aal1` de quem TEM fator. Uma
+ * leitura que não aconteceu não pode virar resposta: quem decide acesso falha
+ * fechado (a exceção vira 500 na rota, nunca 200).
  */
-export async function isMfaEnrolled(): Promise<boolean> {
+export const isMfaEnrolled = cache(async (): Promise<boolean> => {
   const supabase = await createClient();
-  const { data } = await supabase.auth.mfa.listFactors();
+  const { data, error } = await supabase.auth.mfa.listFactors();
+  if (error) throw error;
   return !!data?.totp?.some((f) => f.status === "verified");
-}
+});
 
 /**
  * Quem é OBRIGADO a cadastrar a verificação em duas etapas.
@@ -324,37 +348,39 @@ export async function isMfaEnrolled(): Promise<boolean> {
  * Carrega as duas leituras porque o layout precisa delas de qualquer forma; quem
  * já tem a política em mãos deve chamar `exigeCadastroDeMfa` direto.
  */
-export async function requiresMfa(
-  role: Role | undefined,
-  isPlatformAdmin: boolean,
-  userId?: string,
-  orgId?: string,
-): Promise<boolean> {
-  const admin = createAdminClient();
+export const requiresMfa = cache(
+  async (
+    role: Role | undefined,
+    isPlatformAdmin: boolean,
+    userId?: string,
+    orgId?: string,
+  ): Promise<boolean> => {
+    const admin = createAdminClient();
 
-  let plataformaExige: boolean | null = null;
-  if (isPlatformAdmin && userId) {
-    const { data } = await admin
-      .from("platform_admins")
-      .select("mfa_required")
-      .eq("user_id", userId)
-      .is("revoked_at", null)
-      .maybeSingle();
-    plataformaExige = (data?.mfa_required as boolean | undefined) ?? null;
-  }
+    let plataformaExige: boolean | null = null;
+    if (isPlatformAdmin && userId) {
+      const { data } = await admin
+        .from("platform_admins")
+        .select("mfa_required")
+        .eq("user_id", userId)
+        .is("revoked_at", null)
+        .maybeSingle();
+      plataformaExige = (data?.mfa_required as boolean | undefined) ?? null;
+    }
 
-  let empresaExige = false;
-  if (orgId) {
-    const { data } = await admin
-      .from("organizations")
-      .select("settings")
-      .eq("id", orgId)
-      .maybeSingle();
-    empresaExige = empresaExigeMfa(data?.settings);
-  }
+    let empresaExige = false;
+    if (orgId) {
+      const { data } = await admin
+        .from("organizations")
+        .select("settings")
+        .eq("id", orgId)
+        .maybeSingle();
+      empresaExige = empresaExigeMfa(data?.settings);
+    }
 
-  return exigeCadastroDeMfa({ role, isPlatformAdmin, plataformaExige, empresaExige });
-}
+    return exigeCadastroDeMfa({ role, isPlatformAdmin, plataformaExige, empresaExige });
+  },
+);
 
 /**
  * Nível de garantia da SESSÃO atual: `aal2` = o segundo fator foi provado nesta

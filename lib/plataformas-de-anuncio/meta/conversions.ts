@@ -34,7 +34,10 @@
  */
 import { createHash } from "node:crypto";
 
+import { VERSAO_PADRAO_DA_GRAPH } from "@/lib/graph-version";
 import { logger } from "@/lib/logger";
+
+import { baseDaGraphDeAnuncio } from "./graph-base";
 import type {
   ConversaoOffline,
   CredencialDeConversao,
@@ -45,10 +48,11 @@ import type {
 /**
  * Fixada no código, e não em env nova (item 9 do DoD pede env em dois lugares e
  * este eixo não deve herdar a variável do canal de mensagem — são credenciais e
- * ciclos de vida diferentes). Mesma versão que o transporte de mensagens usa
- * como default hoje, para a instalação não conviver com duas.
+ * ciclos de vida diferentes). Referencia o número do módulo único
+ * (`lib/graph-version.ts`) em vez de copiá-lo: o eixo de anúncio usa a MESMA
+ * versão do transporte de mensagens, mas não a variável dele.
  */
-const VERSAO_DA_API = "v22.0";
+const VERSAO_DA_API = VERSAO_PADRAO_DA_GRAPH;
 
 /** O teto da plataforma. Evento mais velho que isto é recusado. */
 const IDADE_MAXIMA_MS = 7 * 24 * 60 * 60 * 1000;
@@ -77,6 +81,8 @@ async function enviar(
   credencial: CredencialDeConversao,
   conversao: ConversaoOffline,
 ): Promise<ResultadoDeEnvio> {
+  if (conversao.evento !== "Purchase" || conversao.valorCentavos === null)
+    return { tipo: "permanente", detalhe: "Este transporte aceita apenas compras com valor." };
   const idadeMs = Date.now() - conversao.ocorridoEm.getTime();
   if (idadeMs > IDADE_MAXIMA_MS) {
     const dias = Math.floor(idadeMs / (24 * 60 * 60 * 1000));
@@ -116,8 +122,7 @@ async function enviar(
   if (credencial.testEventCode) corpo.test_event_code = credencial.testEventCode;
 
   const url =
-    `https://graph.facebook.com/${VERSAO_DA_API}/` +
-    `${encodeURIComponent(credencial.datasetId)}/events`;
+    `${baseDaGraphDeAnuncio()}/${encodeURIComponent(credencial.datasetId)}/events`;
 
   let resposta: Response;
   try {
@@ -139,7 +144,18 @@ async function enviar(
     };
   }
 
-  if (resposta.ok) return { tipo: "ok" };
+  if (resposta.ok) {
+    const corpo: unknown = await resposta.json().catch(() => null);
+    if (
+      corpo &&
+      typeof corpo === "object" &&
+      "events_received" in corpo &&
+      corpo.events_received === 1
+    ) {
+      return { tipo: "ok" };
+    }
+    return { tipo: "transitorio", detalhe: "A plataforma não confirmou o recebimento do evento." };
+  }
 
   const texto = await resposta.text().catch(() => "");
   let codigo: number | null = null;
@@ -158,7 +174,7 @@ async function enviar(
     leadId: conversao.leadId,
   });
 
-  if (resposta.status >= 500) {
+  if (resposta.status === 429 || resposta.status >= 500) {
     return { tipo: "transitorio", detalhe: `${resposta.status}: ${mensagem}` };
   }
   return classifica4xx(codigo, mensagem);

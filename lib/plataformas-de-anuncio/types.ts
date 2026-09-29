@@ -1,3 +1,5 @@
+import type { IdentificadoresGoogle } from "./google/identificadores";
+
 /**
  * O vocabulário AGNÓSTICO do eixo de plataformas de anúncio.
  *
@@ -42,10 +44,15 @@
  * REPORTAR. Os dois conjuntos coincidem hoje e não têm por que coincidir sempre
  * — existe plataforma que atribui e não recebe conversão de volta.
  */
+export type ApiDeConversaoGoogle = "google_ads" | "data_manager";
+
 export type PlataformaDeAnuncio = "meta_ads" | "google_ads";
 
-/** Só `Purchase` hoje. `Lead` é a Fase 2 e entra quando `lead.created` for consumido. */
-export type NomeDoEvento = "Purchase";
+/**
+ * Venda, qualificação e cada etapa configurada são resultados distintos e
+ * deduplicados separadamente. `Etapa:<uuid>` vem das regras por etapa (0436).
+ */
+export type NomeDoEvento = "Purchase" | "QualifiedLead" | `Etapa:${string}`;
 
 /**
  * Uma conversão pronta para sair — no formato da CASA, não no da plataforma.
@@ -74,9 +81,10 @@ export interface ConversaoOffline {
   ocorridoEm: Date;
   /** O clique que originou a conversa — `ad_source_id` do contato (0164). */
   cliqueDeOrigem: string;
+  identificadoresGoogle?: IdentificadoresGoogle;
   /** E.164 sem `+`, ainda EM CLARO: o hash é responsabilidade do transporte. */
   telefone: string | null;
-  valorCentavos: number;
+  valorCentavos: number | null;
   moeda: string;
 }
 
@@ -99,29 +107,46 @@ export interface ConversaoOffline {
  */
 export type ResultadoDeEnvio =
   | { tipo: "ok"; detalhe?: string }
+  | { tipo: "processando"; protocolo: string; detalhe: string }
   | { tipo: "transitorio"; detalhe: string; tentarEmMs?: number }
-  | { tipo: "permanente"; detalhe: string };
+  | { tipo: "permanente"; detalhe: string; rejeicaoConfirmada?: boolean };
 
-/** As credenciais que o transporte precisa, já decifradas. */
+/**
+ * As credenciais que o transporte precisa, já decifradas.
+ *
+ * `datasetId`/`accessToken`/`testEventCode` são o formato que a Meta usa
+ * (token longo-vivo, direto). O Google Ads não cabe nesse molde — o access
+ * token dele expira em ~1h e é derivado na hora, a partir de um refresh
+ * token, pelo PRÓPRIO transporte (`google/conversions.ts`), não por
+ * `credenciais.ts`, que é agnóstico e não sabe fazer essa troca. `google`
+ * carrega o que falta: o refresh token decifrado e os três identificadores
+ * de para onde reportar (migration 0307). `undefined` para quem não é Google.
+ */
 export interface CredencialDeConversao {
   datasetId: string;
   accessToken: string;
   /** Preenchido = envio marcado como teste, não conta para otimização. */
   testEventCode: string | null;
+  google?: {
+    api?: ApiDeConversaoGoogle;
+    /** Decifrado; NUNCA o access token — esse é derivado a cada envio. */
+    refreshToken: string;
+    customerId: string;
+    /** `null` = acesso direto, sem conta de gerente (MCC). */
+    loginCustomerId: string | null;
+    conversionActionId: string;
+    /** Negócio ganho sem valor (0436). Ausente = `obrigatorio`, o comportamento de sempre. */
+    modoDeValorDaVenda?: "obrigatorio" | "quando_houver" | "nunca";
+    /** Envia o telefone em SHA-256 (E.164) junto da conversão (0436). */
+    enviarTelefone?: boolean;
+  };
 }
 
-/**
- * O contrato que todo transporte de conversão cumpre.
- *
- * `google_ads` não implementa nenhum hoje — e a ausência é DECLARADA no
- * registry, não deduzida do silêncio (invariante 4).
- */
+/** O contrato que todo transporte de conversão cumpre. */
 export interface TransporteDeConversao {
   plataforma: PlataformaDeAnuncio;
-  enviar(
-    credencial: CredencialDeConversao,
-    conversao: ConversaoOffline,
-  ): Promise<ResultadoDeEnvio>;
+  consultar?(credencial: CredencialDeConversao, protocolo: string): Promise<ResultadoDeEnvio>;
+  enviar(credencial: CredencialDeConversao, conversao: ConversaoOffline): Promise<ResultadoDeEnvio>;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -193,7 +218,22 @@ export type FalhaDeLeitura =
   | "transitorio";
 
 export type ResultadoDeLeitura<T> =
-  | { ok: true; dados: T }
+  | {
+      ok: true;
+      dados: T;
+      /**
+       * Ressalva da leitura que quem olha a TELA precisa saber, mesmo tendo dado.
+       *
+       * Hoje é uma só, e vem da repetição sem os campos do Connect rate (ver
+       * `lerInsights`): o dado chegou, mas uma coluna ficou vazia porque a
+       * plataforma recusou o campo. Coluna vazia sem explicação é
+       * indistinguível de "esta campanha não mediu" — e trocar um erro visível
+       * (a tela caindo) por um erro invisível (número ausente com cara de zero)
+       * é pior. O motivo CRU do provedor fica no log do servidor; aqui vai a
+       * frase que a tela consegue mostrar.
+       */
+      aviso?: string;
+    }
   | { ok: false; falha: FalhaDeLeitura; detalhe: string };
 
 /**
@@ -236,6 +276,11 @@ export interface LinhaDeCampanha {
   alcance: number | null;
   cpm: number | null;
   ctr: number | null;
+  /**
+   * Percentual já calculado (visualizações da página ÷ cliques no link × 100).
+   * Nulo em campanha sem clique no link ou cujo objetivo não leva a uma página.
+   */
+  connectRate: number | null;
   frequencia: number | null;
   cpc: number | null;
   /** Percentual já calculado (reproduções ÷ impressões × 100). Nulo em campanha sem vídeo. */

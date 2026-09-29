@@ -4,7 +4,8 @@
  * Pipeline (S-08.04):
  *   1. Load lgpd_requests row (programmatic org filter).
  *   2. Move status received -> processing, attempts++ (cap at 3).
- *   3. collectExportData → 8-table aggregator (PII-safe; no logs of bodies).
+ *   3. collectExportData → varredura das tabelas que a anonimização alcança (PII-safe).
+ *      Sem contagem fixa aqui: esta linha dizia "8 tabelas" muito depois de serem dezenas.
  *   4. Render PDF via @react-pdf/renderer (PT-BR, Art. 18 II).
  *   5. signPdfPades — STUB when LGPD_SIGNING_KEY missing (warning, no throw).
  *   6. Upload PDF + JSON to bucket `lgpd-exports/{org}/{request}/...`.
@@ -22,6 +23,7 @@
  */
 
 import { createHash } from "node:crypto";
+import { valorDaInstalacao } from "@/lib/instalacao/config";
 
 import type { EventRow, HandlerResult } from "@/lib/event-log/dispatcher";
 import { audit } from "@/lib/audit";
@@ -29,18 +31,23 @@ import { env } from "@/lib/env";
 import { logger } from "@/lib/logger";
 import { collectExportData } from "@/lib/lgpd/export-collector";
 import { findLgpdRequest } from "@/lib/lgpd/repository";
-// Dinâmico, e não `import` estático de propósito: `@/lib/lgpd/pdf-renderer`
-// puxa @react-pdf/renderer → @react-pdf/textkit → @react-pdf/hyphenate/en-us,
-// cujo `exports` wildcard o resolvedor CJS que o `tsx` usa (via seu hook de
-// path alias) não resolve — `ERR_PACKAGE_PATH_NOT_EXPORTED`, mesmo o arquivo
-// existindo (funciona via `import()` nativo fora do tsx). Estático aqui
-// derrubava a IMPORTAÇÃO deste módulo inteiro, e como
-// `register-handlers.ts` importa todo handler no topo, isso derrubava
-// `ensureHandlersRegistered()` para os OUTROS 11 handlers também —
-// `lib/event-log/drain-loop.ts` engolia o erro e desligava o laço rápido
-// inteiro, sobrando só o cron de 1/min pra tudo. Adiado pro ponto de uso, o
-// pior caso vira esta exportação específica falhar (retry via dispatcher),
-// não o drain de TODO evento genérico.
+// IMPORT TARDIO, e a razão é o laço rápido do `event_log`.
+//
+// `lib/event-log/register-handlers.ts` — cujo próprio comentário pede "keep it
+// lightweight" — importa o handler da LGPD no topo, e ele importava este
+// arquivo, que importava o gerador de PDF, que arrasta `@react-pdf/renderer`
+// inteiro. Resultado: TODA montagem do laço carregava a pilha de PDF só para
+// registrar um handler que, na esmagadora maioria das rodadas, não roda.
+//
+// Isso deixou de ser só desperdício em 29/08, quando `@react-pdf/hyphenate`
+// passou a declarar `exports` sem a condição `require`: sob `tsx` (que é como o
+// worker roda, e diferente do vitest, que resolve pelo Vite) o import falhava,
+// `carregarDeps()` caía no catch, e o laço rápido MORRIA — 10 dias e três
+// releases, com a guarda 6/6 verde.
+//
+// O patch em `patches/` conserta a dependência e continua valendo. Este import
+// tardio conserta a CAUSA: o laço deixa de depender de PDF para existir. Um
+// depende de o pnpm aplicar o patch em todo ambiente; o outro, não.
 import { signPdfPades, isPadesConfigured } from "@/lib/lgpd/pades-signer";
 import {
   EmailNotConfigured,
@@ -154,6 +161,10 @@ export async function processLgpdExport(event: EventRow): Promise<HandlerResult>
   try {
     // 3. Collect data.
     const data = await collectExportData({
+      // O piso do encarregado é resolvido AQUI e injetado: o coletor de LGPD
+      // não consulta configuração, para a coleta sem identificador continuar
+      // visitando só `organizations` (tests/invariants/agenda-meet-export).
+      dpoDaInstalacao: (await valorDaInstalacao("LGPD_DPO_EMAIL")).valor?.trim() || null,
       organizationId: orgId,
       requestId,
       contactId: req.contact_id,

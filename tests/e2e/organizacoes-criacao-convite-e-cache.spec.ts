@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { createClient } from "@supabase/supabase-js";
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect, type Page } from "./helpers/test";
 import { credenciaisSupabaseDeTeste } from "../../scripts/lib/env-de-teste";
 
 const credentials = credenciaisSupabaseDeTeste();
@@ -16,7 +16,7 @@ async function login(page: Page, email: string) {
   await page.goto("/login");
   await page.getByLabel(/e-?mail/i).fill(email);
   await page.getByLabel(/senha/i).fill(password);
-  await page.getByRole("button", { name: /entrar/i }).click();
+  await page.getByRole("button", { name: "Entrar", exact: true }).click();
   await page.waitForURL(/\/app(\/|$)/, { timeout: 60_000 });
 }
 async function conversation(org: string, name: string) {
@@ -74,11 +74,27 @@ test("org única oferece criação, responsável aceita e A→B→A não mistura
         if (forged.error) throw forged.error;
       }
       if (!loseResponse) return route.continue();
-      const committed = await route.fetch();
-      expect(committed.status()).toBe(201);
-      const data = (await committed.json()).data;
-      lost.push(data);
-      if (!orgs.includes(data.id)) orgs.push(data.id);
+      // TRÊS entregas do MESMO request, com a MESMA `Idempotency-Key`, e todas
+      // com a resposta perdida no caminho de volta.
+      //
+      // Antes do #787 as três vinham do retry automático do cliente. Aquele PR
+      // parou de retentar método mutante — e a razão é boa: timeout numa
+      // escrita significa "não sei", não "não aconteceu", e o retry cobrava o
+      // mesmo turno de IA três vezes. Clicar de novo NÃO substitui aquilo: cada
+      // clique carimba uma chave nova, e a idempotência do servidor é por chave.
+      //
+      // O que esta spec mede é do SERVIDOR e não mudou: o mesmo pedido entregue
+      // N vezes cria UMA organização. Quem entrega N vezes, hoje, é a rede —
+      // proxy que reenvia, cliente HTTP intermediário, ou o próprio navegador
+      // numa conexão instável. Por isso a repetição vive aqui, na interceptação,
+      // e não num laço de cliques que mediria outra coisa.
+      for (let entrega = 0; entrega < 3; entrega++) {
+        const committed = await route.fetch();
+        expect(committed.status()).toBe(201);
+        const data = (await committed.json()).data;
+        lost.push(data);
+        if (!orgs.includes(data.id)) orgs.push(data.id);
+      }
       await route.abort("failed");
     });
     await page.getByRole("button", { name: "Criar organização", exact: true }).click();
@@ -110,8 +126,8 @@ test("org única oferece criação, responsável aceita e A→B→A não mistura
     await page.getByRole("button", { name: "Copiar convite", exact: true }).click();
     await expect(page.getByText("Link copiado", { exact: true })).toBeVisible();
     expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(link);
-    mkdirSync(".superpowers/evidence/comunidade-360", { recursive: true });
-    await page.screenshot({ path: ".superpowers/evidence/comunidade-360/criacao-convite.png" });
+    mkdirSync("evidence/comunidade-360", { recursive: true });
+    await page.screenshot({ path: "evidence/comunidade-360/criacao-convite.png" });
     // Precondição do teste de cache: o wizard é coberto pela spec de retorno.
     const update = await db.from("organizations").update({ onboarded_at: new Date().toISOString() }).eq("id", orgB);
     if (update.error) throw update.error;
@@ -131,7 +147,7 @@ test("org única oferece criação, responsável aceita e A→B→A não mistura
     await expect(page.getByTestId("tenant-switcher")).toContainText(`Empresa A ${suffix}`);
     await expect(page.locator("[data-conversation-id]").getByText(`Cliente A ${suffix}`, { exact: true })).toBeVisible();
     expect((await page.context().cookies()).find(cookie => cookie.name === "active_org")?.value).toBe(cookieBeforeFailure);
-    await page.screenshot({ path: ".superpowers/evidence/comunidade-360/troca-falhou-contexto-preservado.png" });
+    await page.screenshot({ path: "evidence/comunidade-360/troca-falhou-contexto-preservado.png" });
     await page.unroute("**/app/**");
     for (const [target, own, foreign] of [[orgB, "B", "A"], [orgA, "A", "B"]]) {
       await page.evaluate(() => { (window as unknown as Record<string, unknown>).__oldDocument = true; });
@@ -152,7 +168,7 @@ test("org única oferece criação, responsável aceita e A→B→A não mistura
           const style = getComputedStyle(element);
           return rect.width >= innerWidth && rect.height >= innerHeight && style.position === "fixed" && style.backgroundColor !== "rgba(0, 0, 0, 0)";
         })).toBe(true);
-        await page.screenshot({ path: `.superpowers/evidence/comunidade-360/transicao-para-${own}.png` });
+        await page.screenshot({ path: `evidence/comunidade-360/transicao-para-${own}.png` });
       } finally { release(); }
       await navigation;
       await page.waitForURL("**/app/inbox", { waitUntil: "load" });
@@ -162,7 +178,7 @@ test("org única oferece criação, responsável aceita e A→B→A não mistura
       await expect(page.locator("[data-conversation-id]").getByText(`Cliente ${own} ${suffix}`, { exact: true })).toBeVisible();
       await expect(page.locator("[data-conversation-id]").getByText(`Cliente ${foreign} ${suffix}`, { exact: true })).toHaveCount(0);
     }
-    await page.screenshot({ path: ".superpowers/evidence/comunidade-360/inbox-volta-a.png" });
+    await page.screenshot({ path: "evidence/comunidade-360/inbox-volta-a.png" });
     guestContext = await browser.newContext();
     const guest = await guestContext.newPage();
     await login(guest, guestEmail);
@@ -174,7 +190,7 @@ test("org única oferece criação, responsável aceita e A→B→A não mistura
     await expect(guest.locator("[data-conversation-id]").getByText(`Cliente B ${suffix}`, { exact: true })).toBeVisible();
     const membership = await db.from("user_organizations").select("invited_by,role").eq("organization_id", orgB).eq("user_id", users[1]).single();
     expect(membership.data).toEqual({ invited_by: users[0], role: "admin" });
-    await guest.screenshot({ path: ".superpowers/evidence/comunidade-360/aceite-na-org-b.png" });
+    await guest.screenshot({ path: "evidence/comunidade-360/aceite-na-org-b.png" });
   } finally {
     await guestContext?.close();
     for (const org of orgs) await db.from("organizations").delete().eq("id", org);

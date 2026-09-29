@@ -8,10 +8,17 @@
  * ali, e o motivo era uma coluna faltando no `OR` da busca.
  *
  * Contato que entra pelo WhatsApp nasce só com `display_name` (o pushName do
- * aparelho); `name` fica nulo até alguém editar à mão. A UI inteira prefere
- * `display_name` (ver `resolveContactName`). A busca olhava só `name`, `email` e
- * `phone_number` — ou seja, ignorava justamente o nome que a pessoa lê na tela e
- * digita no campo de busca.
+ * aparelho); `name` fica nulo até alguém editar à mão. A busca olhava só `name`,
+ * `email` e `phone_number` — ou seja, ignorava justamente o nome que a pessoa lê
+ * na tela e digita no campo de busca.
+ *
+ * ⚠️ O QUE ESTE ARQUIVO NÃO AFIRMA. Esta linha já dizia "a UI inteira prefere
+ * `display_name` (ver `resolveContactName`)", e a afirmação envelheceu inteira
+ * na issue #906, que inverteu a precedência: quem decide o nome exibido é
+ * `nomeDoContato` (lib/contacts/rotulo-do-contato.ts), e a ordem em vigor se lê
+ * ali, não aqui. O que justifica `display_name` no OR não é a ordem — é o DADO:
+ * ela é a única coluna preenchida em 15 dos 33 contatos desta instalação, e essa
+ * razão continua verdadeira com a ordem invertida.
  *
  * O teste é sobre o FILTRO montado, não sobre o resultado do banco: é a decisão
  * que estava errada, e é ela que precisa ficar vigiada.
@@ -73,8 +80,11 @@ async function colunasComIsNull(): Promise<string[]> {
 
 describe("busca de contatos", () => {
   it("procura no display_name — o nome que a tela mostra e o WhatsApp preenche", async () => {
+    // O espaço do termo virou curinga na #1835 (a mesma régua da busca de
+    // conversas); o que este caso vigia é a COLUNA estar no OR, e por isso a
+    // asserção cita `display_name` por inteiro, com o padrão que hoje sai.
     const filtro = await filtroDaBusca("Cliente Retorno");
-    expect(filtro).toContain("display_name.ilike.%Cliente Retorno%");
+    expect(filtro).toContain("display_name.ilike.%Cliente*Retorno%");
   });
 
   it("continua procurando nas colunas que já procurava", async () => {
@@ -87,11 +97,14 @@ describe("busca de contatos", () => {
   });
 
   it("nome com vírgula não injeta condição extra no filtro", async () => {
-    // `,` separa condições no DSL do `.or()`. Sem escape, "Silva, Maria" vira
-    // duas condições e a busca devolve gente que ninguém pediu.
+    // `,` separa condições no `.or()`. Sem saneamento, "Silva, Maria" viraria
+    // duas condições e a busca devolveria gente que ninguém pediu — e depois da
+    // #1835 a vírgula não some: ela vira o MESMO curinga do espaço, que é o que
+    // faz "Silva Maria" achar o cadastro "Silva, Maria" (a asserção de baixo é a
+    // catraca da normalização; a de cima é a da gramática).
     const filtro = await filtroDaBusca("Silva, Maria");
     expect(filtro).not.toContain("Silva,");
-    expect(filtro).toContain("Silva  Maria");
+    expect(filtro).toContain("Silva*Maria");
   });
 
   it("curinga do LIKE digitado pelo usuário é literal, não coringa", async () => {

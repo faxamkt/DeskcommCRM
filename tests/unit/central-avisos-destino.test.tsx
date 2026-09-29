@@ -1,9 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import { AgentInboxList } from "@/app/app/ai/inbox/_components/AgentInboxList";
-import { useAgentInbox, useUpdateInboxItem, type AgentInboxItem } from "@/hooks/ai/useAgentInbox";
+import { useAgentInbox, useResolveAllInboxItems, useUpdateInboxItem, type AgentInboxItem } from "@/hooks/ai/useAgentInbox";
 import { ApiError } from "@/lib/api/types";
-vi.mock("@/hooks/ai/useAgentInbox", () => ({ useAgentInbox: vi.fn(), useUpdateInboxItem: vi.fn() }));
+vi.mock("@/hooks/ai/useAgentInbox", () => ({ useAgentInbox: vi.fn(), useUpdateInboxItem: vi.fn(), useResolveAllInboxItems: vi.fn() }));
 vi.mock("@/hooks/i18n/useT", () => ({ useT: () => (s: string) => s }));
 vi.mock("@/hooks/i18n/useLocaleDeData", () => ({ useLocaleDeData: () => undefined }));
 const mutate = vi.fn();
@@ -11,7 +11,7 @@ const item: AgentInboxItem = { id: "aviso", kind: "handoff", severity: "warn", t
 function dados(value = item) {
   vi.mocked(useAgentInbox).mockReturnValue({ data: { items: [value], open_count: 1 }, isLoading: false } as ReturnType<typeof useAgentInbox>);
 }
-beforeEach(() => { vi.clearAllMocks(); dados(); vi.mocked(useUpdateInboxItem).mockReturnValue({ mutate, isPending: false } as unknown as ReturnType<typeof useUpdateInboxItem>); });
+beforeEach(() => { vi.clearAllMocks(); dados(); vi.mocked(useUpdateInboxItem).mockReturnValue({ mutate, isPending: false } as unknown as ReturnType<typeof useUpdateInboxItem>); vi.mocked(useResolveAllInboxItems).mockReturnValue({ mutate: vi.fn(), isPending: false } as unknown as ReturnType<typeof useResolveAllInboxItems>); });
 describe("Central: navegação separada da resolução", () => {
   it("contexto é link, clique não muda status; resolver chama uma vez", () => {
     render(<AgentInboxList canResolve />);
