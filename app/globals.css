@@ -25,56 +25,96 @@
 @custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
 
 /* ─────────────────────────────────────────────────────────────────────────
-   DeskcommCRM — Design System tokens (Sage palette · density Aerada)
-   Source of truth: /app/design/lib/tokens.ts (PALETTES.sage)
+   DeskcommCRM — Design System tokens (identidade lima/grafite · 2026-10)
+   Fundo cinza quente, superfícies claras arredondadas, grafite como tinta e
+   lima como preenchimento de ação. Outfit nos títulos e números, Hanken
+   Grotesk no texto (app/layout.tsx).
    Light + dark drawn separately (NOT inverted).
+   A paleta anterior (Sage) segue em /app/design/lib/tokens.ts como histórico
+   do laboratório de design — não é mais a fonte destes valores.
    ───────────────────────────────────────────────────────────────────────── */
 
 :root {
   /* Surfaces (light) */
-  --color-bg: #faf9f6;
-  --color-surface: #ffffff;
-  --color-surface-elevated: #f5f3ee;
-  --color-overlay: rgba(28, 26, 22, 0.42);
+  --color-bg: #e8e7e4;
+  --color-surface: #f6f5f3;
+  --color-surface-elevated: #eeede9;
+  --color-overlay: rgba(27, 27, 25, 0.44);
 
   /* Text (light) */
-  --color-text: #1c1a16;
-  --color-text-muted: #5d594f;
-  --color-text-subtle: #7d786c;
+  --color-text: #1b1b19;
+  --color-text-muted: #5f5e59;
+  --color-text-subtle: #6e6d67;
 
   /* Borders (light) */
-  --color-border: #e7e3da;
-  --color-border-strong: #d2cdbf;
+  --color-border: #deddd7;
+  --color-border-strong: #c9c8c1;
 
-  /* Accent — Sage (11 stops) */
-  --color-accent-50:  #f3f6f1;
-  --color-accent-100: #e4ebe0;
-  --color-accent-200: #c8d6c1;
-  --color-accent-300: #a4ba9a;
-  --color-accent-400: #82a077;
-  --color-accent-500: #67885d;
-  --color-accent-600: #506d48;
-  --color-accent-700: #41573b;
-  --color-accent-800: #374731;
-  --color-accent-900: #2f3c2b;
-  --color-accent-950: #171f15;
+  /* Accent — família do lima escurecida (11 stops, h ≈ 122°). Derivada por
+     `rampaDeSemente("#596d04")`: é a mesma escada que a marca de qualquer
+     instalação recebe, então o produto é só mais uma semente nela. */
+  --color-accent-50:  #f3f6ed;
+  --color-accent-100: #e5ecd6;
+  --color-accent-200: #cad7ad;
+  --color-accent-300: #a9bb79;
+  --color-accent-400: #8aa145;
+  --color-accent-500: #71881a;
+  --color-accent-600: #596d04;
+  --color-accent-700: #485711;
+  --color-accent-800: #3b4714;
+  --color-accent-900: #333c16;
+  --color-accent-950: #191f09;
   --color-accent: var(--color-accent-600);
   --color-accent-fg: #ffffff;
   --color-accent-soft: var(--color-accent-100);
   --color-accent-hover: var(--color-accent-700);
 
-  /* Neutrals — greige (11 stops, light) */
-  --color-neutral-50:  #faf9f6;
-  --color-neutral-100: #f3f1ec;
-  --color-neutral-200: #e7e3da;
-  --color-neutral-300: #d2cdbf;
-  --color-neutral-400: #a9a395;
-  --color-neutral-500: #7d786c;
-  --color-neutral-600: #5d594f;
-  --color-neutral-700: #46433b;
-  --color-neutral-800: #2e2c26;
-  --color-neutral-900: #1c1a16;
-  --color-neutral-950: #0e0d0a;
+  /* ---- Identidade: preenchimento de destaque e superfície de tinta --------
+   * O accent tem DOIS trabalhos que o lima não consegue fazer ao mesmo tempo.
+   * Como TEXTO/BORDA/ANEL (`text-accent`, `border-accent`, `:focus-visible`)
+   * ele precisa de 4,5:1 / 3:1 contra o fundo claro, e o lima dá 1,04:1 contra
+   * `--color-bg` — some. Como PREENCHIMENTO de ação (botão primário, contador,
+   * chip de ícone) ele pinta a área inteira e quem carrega a leitura é o texto
+   * POR CIMA dele: grafite sobre lima dá 13,43:1.
+   *
+   * Por isso o lima mora num papel próprio, `--color-accent-fill`, e a rampa
+   * `--color-accent-NNN` é a família dele escurecida (mesmo matiz, h ≈ 122°),
+   * que É legível como texto. Os dois andam juntos com a marca da instalação:
+   * `lib/branding/css.ts` aponta `--color-accent-fill` para o accent da marca
+   * quando há uma, e a tela de quem configurou cor continua com o botão sólido
+   * na cor dela — exatamente como antes desta identidade.
+   *
+   * São LITERAIS, e não `var(--color-accent-NNN)`, de propósito: a régua de
+   * contraste (`extrairRegua`) trata toda referência direta à rampa como papel
+   * de componente medido contra as superfícies, e o lima reprovaria um teste
+   * que não descreve o uso dele. O par que ele de fato forma (texto sobre
+   * preenchimento) é medido em `tests/unit/identidade-visual.test.ts`.
+   *
+   * `--color-ink` é a superfície grafite (item ativo do menu, cartão em
+   * destaque) e `--color-ink-accent` é a cor de destaque SOBRE ela — lima no
+   * produto, o accent do tema escuro da marca quando há uma (que é, por
+   * construção, o stop que passa sobre superfície escura).
+   */
+  --color-accent-fill: #cbf24c;
+  --color-accent-fill-fg: #1b1b19;
+  --color-accent-fill-hover: #bfe540;
+  --color-ink: #1b1b19;
+  --color-ink-fg: #f6f5f3;
+  --color-ink-muted: #b6b7aa;
+  --color-ink-accent: #cbf24c;
+
+  /* Neutrals — cinza quente (11 stops, light) */
+  --color-neutral-50:  #f6f5f3;
+  --color-neutral-100: #eeede9;
+  --color-neutral-200: #deddd7;
+  --color-neutral-300: #c9c8c1;
+  --color-neutral-400: #a3a29b;
+  --color-neutral-500: #7a7973;
+  --color-neutral-600: #5f5e59;
+  --color-neutral-700: #46453f;
+  --color-neutral-800: #2e2e2a;
+  --color-neutral-900: #1b1b19;
+  --color-neutral-950: #0e0e0d;
 
   /* States (light) */
   --color-success: #5a8a5f;
@@ -108,10 +148,13 @@
 
   /* Radius */
   --radius-none: 0px;
-  --radius-sm: 4px;
-  --radius-md: 8px;
-  --radius-lg: 12px;
-  --radius-xl: 16px;
+  /* Formas mais arredondadas da identidade: controles em 10px, cartões em 20px,
+     painéis grandes em 26px, botões e filtros em pílula (`rounded-full`). */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 20px;
+  --radius-2xl: 26px;
   --radius-full: 9999px;
 
   /* Shadows — desaturated, neutral-based */
@@ -192,7 +235,8 @@
    * equipe. Por isso Telha, Âmbar, Oliva, Turquesa, Azul, Índigo, Violeta,
    * Framboesa: oito palavras diferentes.
    *
-   * A faixa 113-165 é vetada: é onde mora a accent Sage (139 graus). Cor de
+   * A faixa 113-165 é vetada: é onde mora o accent do produto (lima, ~122 graus;
+   * era a Sage, 139, quando a faixa foi escolhida — e o lima caiu dentro dela). Cor de
    * PESSOA não pode ser confundida com cor de ESTADO do sistema.
    *
    * A luminosidade ALTERNA entre vizinhos, que é o truque da Okabe-Ito para
@@ -241,7 +285,7 @@
    As 11 paradas `--color-accent-NNN` ficam DE FORA de propósito. Elas são
    idênticas nos dois blocos do produto, então omiti-las não muda pixel algum
    aqui; e, na instalação que trocou a cor, a subárvore clara passa a herdar a
-   rampa do `<html>` (a do revendedor) em vez de fixar a Sage. Pelo mesmo
+   rampa do `<html>` (a do revendedor) em vez de fixar a do produto. Pelo mesmo
    motivo os papéis abaixo mantêm a forma `var(--color-accent-NNN)`.
 
    Buraco conhecido: `--color-accent-fg` é literal `#ffffff` e, numa subárvore
@@ -250,30 +294,37 @@
    (lib/branding/css.ts), que só ganha consumidor com a tela de marca.
    ───────────────────────────────────────────────────────────────────────── */
 [data-theme="light"] {
-  --color-bg: #faf9f6;
-  --color-surface: #ffffff;
-  --color-surface-elevated: #f5f3ee;
-  --color-overlay: rgba(28, 26, 22, 0.42);
-  --color-text: #1c1a16;
-  --color-text-muted: #5d594f;
-  --color-text-subtle: #7d786c;
-  --color-border: #e7e3da;
-  --color-border-strong: #d2cdbf;
+  --color-bg: #e8e7e4;
+  --color-surface: #f6f5f3;
+  --color-surface-elevated: #eeede9;
+  --color-overlay: rgba(27, 27, 25, 0.44);
+  --color-text: #1b1b19;
+  --color-text-muted: #5f5e59;
+  --color-text-subtle: #6e6d67;
+  --color-border: #deddd7;
+  --color-border-strong: #c9c8c1;
   --color-accent: var(--color-accent-600);
   --color-accent-fg: #ffffff;
   --color-accent-soft: var(--color-accent-100);
   --color-accent-hover: var(--color-accent-700);
-  --color-neutral-50: #faf9f6;
-  --color-neutral-100: #f3f1ec;
-  --color-neutral-200: #e7e3da;
-  --color-neutral-300: #d2cdbf;
-  --color-neutral-400: #a9a395;
-  --color-neutral-500: #7d786c;
-  --color-neutral-600: #5d594f;
-  --color-neutral-700: #46433b;
-  --color-neutral-800: #2e2c26;
-  --color-neutral-900: #1c1a16;
-  --color-neutral-950: #0e0d0a;
+  --color-accent-fill: #cbf24c;
+  --color-accent-fill-fg: #1b1b19;
+  --color-accent-fill-hover: #bfe540;
+  --color-ink: #1b1b19;
+  --color-ink-fg: #f6f5f3;
+  --color-ink-muted: #b6b7aa;
+  --color-ink-accent: #cbf24c;
+  --color-neutral-50: #f6f5f3;
+  --color-neutral-100: #eeede9;
+  --color-neutral-200: #deddd7;
+  --color-neutral-300: #c9c8c1;
+  --color-neutral-400: #a3a29b;
+  --color-neutral-500: #7a7973;
+  --color-neutral-600: #5f5e59;
+  --color-neutral-700: #46453f;
+  --color-neutral-800: #2e2e2a;
+  --color-neutral-900: #1b1b19;
+  --color-neutral-950: #0e0e0d;
   --color-success: #5a8a5f;
   --color-success-bg: rgba(90, 138, 95, 0.12);
   --color-success-fg: #41673f;
@@ -328,49 +379,60 @@
 
 [data-theme="dark"] {
   /* Surfaces (dark — drawn) */
-  --color-bg: #161510;
-  --color-surface: #1d1c17;
-  --color-surface-elevated: #272620;
-  --color-overlay: rgba(0, 0, 0, 0.55);
+  --color-bg: #121211;
+  --color-surface: #1b1b19;
+  --color-surface-elevated: #252522;
+  --color-overlay: rgba(0, 0, 0, 0.6);
 
   /* Text (dark) */
-  --color-text: #f5f4ef;
-  --color-text-muted: #8e8b7f;
-  --color-text-subtle: #605e54;
+  --color-text: #f1f0ec;
+  --color-text-muted: #9a9992;
+  --color-text-subtle: #7a7973;
 
   /* Borders (dark) */
-  --color-border: #33312a;
-  --color-border-strong: #444239;
+  --color-border: #2e2e2a;
+  --color-border-strong: #3d3d38;
 
-  /* Accent stays same hex stops; default shifts up for dark contrast */
-  --color-accent-50:  #f3f6f1;
-  --color-accent-100: #e4ebe0;
-  --color-accent-200: #c8d6c1;
-  --color-accent-300: #a4ba9a;
-  --color-accent-400: #82a077;
-  --color-accent-500: #67885d;
-  --color-accent-600: #506d48;
-  --color-accent-700: #41573b;
-  --color-accent-800: #374731;
-  --color-accent-900: #2f3c2b;
-  --color-accent-950: #171f15;
+  /* A rampa é a mesma do claro; o PAPEL sobe dois degraus para contrastar no escuro */
+  --color-accent-50:  #f3f6ed;
+  --color-accent-100: #e5ecd6;
+  --color-accent-200: #cad7ad;
+  --color-accent-300: #a9bb79;
+  --color-accent-400: #8aa145;
+  --color-accent-500: #71881a;
+  --color-accent-600: #596d04;
+  --color-accent-700: #485711;
+  --color-accent-800: #3b4714;
+  --color-accent-900: #333c16;
+  --color-accent-950: #191f09;
   --color-accent: var(--color-accent-400);
-  --color-accent-fg: #161510;
-  --color-accent-soft: rgba(130, 160, 119, 0.16);
+  --color-accent-fg: #121211;
+  --color-accent-soft: rgba(138, 161, 69, 0.16);
   --color-accent-hover: var(--color-accent-300);
 
-  /* Neutrals — greige (11 stops, dark) */
-  --color-neutral-50:  #f5f4ef;
-  --color-neutral-100: #e6e4dc;
-  --color-neutral-200: #bbb8ac;
-  --color-neutral-300: #8e8b7f;
-  --color-neutral-400: #605e54;
-  --color-neutral-500: #444239;
-  --color-neutral-600: #33312a;
-  --color-neutral-700: #272620;
-  --color-neutral-800: #1d1c17;
-  --color-neutral-900: #161510;
-  --color-neutral-950: #0c0b08;
+  /* Identidade (tema escuro). O lima continua sendo o preenchimento — sobre
+   * grafite ele já é a cor mais legível que existe aqui. `--color-ink` sobe um
+   * degrau acima de `--color-surface` para o item ativo ainda se destacar. */
+  --color-accent-fill: #cbf24c;
+  --color-accent-fill-fg: #1b1b19;
+  --color-accent-fill-hover: #d6f56e;
+  --color-ink: #2b2b27;
+  --color-ink-fg: #f1f0ec;
+  --color-ink-muted: #b6b7aa;
+  --color-ink-accent: #cbf24c;
+
+  /* Neutrals — cinza quente (11 stops, dark) */
+  --color-neutral-50:  #f1f0ec;
+  --color-neutral-100: #deddd7;
+  --color-neutral-200: #b9b8b1;
+  --color-neutral-300: #9a9992;
+  --color-neutral-400: #7a7973;
+  --color-neutral-500: #3d3d38;
+  --color-neutral-600: #2e2e2a;
+  --color-neutral-700: #252522;
+  --color-neutral-800: #1b1b19;
+  --color-neutral-900: #121211;
+  --color-neutral-950: #0a0a09;
 
   /* States (dark) */
   --color-success: #82a077;
@@ -463,7 +525,7 @@
   --color-text-muted: var(--color-text-muted);
   --color-text-subtle: var(--color-text-subtle);
 
-  /* Accent — Sage */
+  /* Accent — rampa legível (texto/borda/anel) */
   --color-accent: var(--color-accent);
   --color-accent-foreground: var(--color-accent-fg);
   --color-accent-soft: var(--color-accent-soft);
@@ -479,6 +541,15 @@
   --color-accent-800: var(--color-accent-800);
   --color-accent-900: var(--color-accent-900);
   --color-accent-950: var(--color-accent-950);
+
+  /* Identidade — preenchimento de ação e superfície de tinta (ver :root) */
+  --color-accent-fill: var(--color-accent-fill);
+  --color-accent-fill-foreground: var(--color-accent-fill-fg);
+  --color-accent-fill-hover: var(--color-accent-fill-hover);
+  --color-ink: var(--color-ink);
+  --color-ink-foreground: var(--color-ink-fg);
+  --color-ink-muted: var(--color-ink-muted);
+  --color-ink-accent: var(--color-ink-accent);
 
   /* Neutrals — greige */
   --color-neutral-50: var(--color-neutral-50);
@@ -532,8 +603,12 @@
   --color-card-foreground: var(--color-text);
 
   /* Tipografia */
-  --font-sans: var(--font-atkinson), ui-sans-serif, system-ui, -apple-system,
+  --font-sans: var(--font-hanken), ui-sans-serif, system-ui, -apple-system,
     "Segoe UI", Roboto, sans-serif;
+  /* Títulos e números. `font-display` é o utilitário; os `h1`–`h3` já recebem
+     a família pelo `@layer base`. */
+  --font-display: var(--font-outfit), var(--font-hanken), ui-sans-serif,
+    system-ui, sans-serif;
   --font-mono: var(--font-mono), ui-monospace, SFMono-Regular, Menlo, Monaco,
     Consolas, monospace;
 
@@ -566,6 +641,7 @@
   --radius-md: var(--radius-md);
   --radius-lg: var(--radius-lg);
   --radius-xl: var(--radius-xl);
+  --radius-2xl: var(--radius-2xl);
   --radius-full: var(--radius-full);
 
   /* Sombra */
@@ -678,12 +754,21 @@
     overflow-x: hidden;
     background-color: var(--color-bg);
     color: var(--color-text);
-    font-family: var(--font-atkinson), ui-sans-serif, system-ui, -apple-system,
+    font-family: var(--font-hanken), ui-sans-serif, system-ui, -apple-system,
       "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-    font-feature-settings: "rlig" 1, "calt" 1, "ss01" 1;
+    font-feature-settings: "rlig" 1, "calt" 1;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
     text-rendering: optimizeLegibility;
+  }
+
+  /* Títulos na Outfit, com o aperto de tracking que a família pede em tamanho
+     grande. Só `h1`–`h3`: `h4` para baixo é rótulo de seção dentro de cartão, e
+     ali a Hanken lê melhor. Utilitário vence `@layer base`, então um título que
+     declare `font-sans` continua mandando. */
+  h1, h2, h3 {
+    font-family: var(--font-display);
+    letter-spacing: -0.02em;
   }
 
   code, kbd, pre, samp {
@@ -701,7 +786,7 @@
     color: var(--color-accent-50);
   }
 
-  /* Focus ring: Sage 500/400, 2px with offset */
+  /* Focus ring: accent 500/400, 2px with offset */
   :focus-visible {
     outline: 2px solid var(--color-accent-500);
     outline-offset: 2px;
@@ -736,7 +821,7 @@
     }
   }
 
-  /* Scrollbar — subtle greige */
+  /* Scrollbar — cinza quente discreto */
   * {
     scrollbar-width: thin;
     scrollbar-color: var(--color-neutral-300) transparent;

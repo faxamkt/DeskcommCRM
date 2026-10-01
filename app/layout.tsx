@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
-import { Atkinson_Hyperlegible, IBM_Plex_Mono } from "next/font/google";
+import { IBM_Plex_Mono } from "next/font/google";
+import localFont from "next/font/local";
 import { headers } from "next/headers";
 import { Toaster } from "sonner";
 import { coresDaBarraDoNavegador } from "@/lib/branding/barra-do-navegador";
@@ -25,11 +26,31 @@ import { Providers } from "./providers";
 import { PublicEnvScript } from "./public-env-script";
 import "./globals.css";
 
-const atkinson = Atkinson_Hyperlegible({
-  subsets: ["latin", "latin-ext"],
-  weight: ["400", "700"],
+/**
+ * As duas fontes da identidade são LOCAIS (`app/fonts/`), não `next/font/google`.
+ *
+ * Os arquivos são os mesmos que a identidade visual aprovada usa — variáveis,
+ * subconjunto latin, cobrindo os acentos de PT e ES — e são SIL OFL 1.1 (lido da
+ * tabela `name` de cada um). O texto da licença mora em
+ * `public/licenses/fonts-OFL.txt` porque só `public/` chega à imagem final.
+ *
+ * Local também tira do build a dependência de rede para essas duas: o
+ * `next/font/google` baixa os arquivos no `next build`.
+ *
+ * Os pesos são a faixa do eixo `wght` — o arquivo é um só por família.
+ */
+const hanken = localFont({
+  src: "./fonts/hanken-grotesk-variable-latin.woff2",
+  weight: "100 900",
   display: "swap",
-  variable: "--font-atkinson",
+  variable: "--font-hanken",
+});
+
+const outfit = localFont({
+  src: "./fonts/outfit-variable-latin.woff2",
+  weight: "100 900",
+  display: "swap",
+  variable: "--font-outfit",
 });
 
 const plexMono = IBM_Plex_Mono({
@@ -278,7 +299,7 @@ export default function RootLayout({
       lang="pt-BR"
       data-theme="light"
       suppressHydrationWarning
-      className={`${atkinson.variable} ${plexMono.variable}`}
+      className={`${hanken.variable} ${outfit.variable} ${plexMono.variable}`}
     >
       <head>
         {/* Primeiro de tudo: a cor da instalação, antes do CSS e do script de tema. */}
