@@ -112,9 +112,14 @@ export function SidebarContent({
 
   return (
     <>
+      {/*
+        `h-12` e não mais `h-14`: a barra agora flutua com 12px de respiro em
+        cima e embaixo (AppShell), e esses 24px saíram da altura útil do menu,
+        que é MEDIDA (ver o bloco de densidade logo abaixo). 8px voltam daqui.
+      */}
       <div
         className={cn(
-          "flex h-14 items-center border-b px-4",
+          "flex h-12 shrink-0 items-center gap-2.5 px-3 pt-1",
           collapsed ? "justify-center" : "justify-start",
         )}
       >
@@ -127,16 +132,29 @@ export function SidebarContent({
           // eslint-disable-next-line @next/next/no-img-element
           <img src={logo} alt={nome} className="h-7 w-auto max-w-[10rem] object-contain" />
         ) : (
-          <span className={cn("font-semibold tracking-tight", collapsed && "sr-only")}>{nome}</span>
-        )}
-        {collapsed && (
-          <span aria-hidden className="text-lg font-bold text-primary">
-            {/* Spread e não `[0]`: nome começando com emoji ou acento composto
-                quebraria no meio do code point. Mesma regra de `resolveBranding`
-                — a inicial precisa acompanhar o nome que a barra mostra, senão
-                recolher o menu troca a marca. */}
-            {[...nome][0]?.toUpperCase() ?? brand.initial}
-          </span>
+          <>
+            {/* O selo é a INICIAL do nome resolvido, não um logo inventado: sem
+                logo configurado, a identidade desenha a marca de quem está aqui
+                (organização > instalação > produto) num quadrado grafite. */}
+            <span
+              aria-hidden
+              className="grid h-8 w-8 shrink-0 place-items-center rounded-[10px] bg-ink font-display text-base font-semibold text-ink-accent"
+            >
+              {/* Spread e não `[0]`: nome começando com emoji ou acento composto
+                  quebraria no meio do code point. Mesma regra de `resolveBranding`
+                  — a inicial precisa acompanhar o nome que a barra mostra, senão
+                  recolher o menu troca a marca. */}
+              {[...nome][0]?.toUpperCase() ?? brand.initial}
+            </span>
+            <span
+              className={cn(
+                "truncate font-display text-lg font-medium tracking-tight",
+                collapsed && "sr-only",
+              )}
+            >
+              {nome}
+            </span>
+          </>
         )}
       </div>
       {/*
@@ -184,7 +202,7 @@ export function SidebarContent({
         o PR: cada linha custa 32px (28px de altura + 4px de `space-y-1`), e
         trocar N destinos do menu por um único link de hub devolve (N-1)×32px.
       */}
-      <nav className="flex-1 space-y-2 overflow-y-auto p-2" aria-label={t("Navegação principal")}>
+      <nav className="flex-1 space-y-2 overflow-y-auto px-2 pt-1 pb-2" aria-label={t("Navegação principal")}>
         {grupos.map(({ group, items }) => {
           const tituloId = `nav-grupo-${group.id}`;
           // Recolhido o sidebar inteiro (rail de 64px), o grupo sempre mostra
@@ -202,7 +220,7 @@ export function SidebarContent({
                     type="button"
                     onClick={() => toggleGrupo(group.id)}
                     aria-expanded={aberto}
-                    className="flex w-full items-center justify-between rounded-md px-3 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-accent/40 hover:text-foreground"
+                    className="flex w-full items-center justify-between rounded-lg px-3 py-1 text-[10px] font-semibold tracking-[0.14em] text-muted-foreground uppercase transition-colors hover:bg-surface-elevated hover:text-foreground"
                   >
                     {t(group.label)}
                     <CaretDown
@@ -234,14 +252,22 @@ export function SidebarContent({
                           aria-current={isActive ? "page" : undefined}
                           onClick={onNavigate}
                           className={cn(
-                            "relative flex items-center gap-3 rounded-md px-3 py-1 text-sm transition-colors",
+                            "group/item relative flex items-center gap-3 rounded-xl px-3 py-1 text-sm transition-colors",
                             isActive
-                              ? "bg-accent text-accent-foreground"
-                              : "text-muted-foreground hover:bg-accent/50 hover:text-foreground",
+                              ? "bg-ink font-medium text-ink-foreground"
+                              : "text-muted-foreground hover:bg-surface-elevated hover:text-foreground",
                             collapsed && "justify-center px-2",
                           )}
                         >
-                          <Icon size={18} weight={isActive ? "fill" : "regular"} aria-hidden />
+                          {/* O destaque sobre grafite (`--color-ink-accent`) é o lima no
+                              produto e o accent ESCURO da marca numa instalação com
+                              marca — a cor do tema claro dela poderia sumir aqui. */}
+                          <Icon
+                            size={18}
+                            weight={isActive ? "fill" : "regular"}
+                            className={cn(isActive && "text-ink-accent")}
+                            aria-hidden
+                          />
                           {!collapsed && <span className="truncate">{t(item.label)}</span>}
                           {item.healthDot && (
                             <ConnectionHealthDot
@@ -260,10 +286,10 @@ export function SidebarContent({
                         aria-current={pathname === group.hub.href ? "page" : undefined}
                         onClick={onNavigate}
                         className={cn(
-                          "flex items-center gap-3 rounded-md px-3 py-1 text-sm transition-colors",
+                          "flex items-center gap-3 rounded-xl px-3 py-1 text-sm transition-colors",
                           pathname === group.hub.href
-                            ? "bg-accent text-accent-foreground"
-                            : "text-muted-foreground hover:bg-accent/50 hover:text-foreground",
+                            ? "bg-ink font-medium text-ink-foreground [&_svg]:text-ink-accent"
+                            : "text-muted-foreground hover:bg-surface-elevated hover:text-foreground",
                           collapsed && "justify-center px-2",
                         )}
                       >
@@ -278,7 +304,7 @@ export function SidebarContent({
           );
         })}
       </nav>
-      <div className="border-t p-2">
+      <div className="border-t border-border/70 p-2">
         {rodape && (
           <Link
             href={rodape.href}
@@ -286,10 +312,10 @@ export function SidebarContent({
             aria-current={pathname.startsWith(rodape.href) ? "page" : undefined}
             onClick={onNavigate}
             className={cn(
-              "mb-1 flex items-center gap-3 rounded-md px-3 py-1 text-sm transition-colors",
+              "mb-1 flex items-center gap-3 rounded-xl px-3 py-1 text-sm transition-colors",
               pathname.startsWith(rodape.href)
-                ? "bg-accent text-accent-foreground"
-                : "text-muted-foreground hover:bg-accent/50 hover:text-foreground",
+                ? "bg-ink font-medium text-ink-foreground [&_svg]:text-ink-accent"
+                : "text-muted-foreground hover:bg-surface-elevated hover:text-foreground",
               collapsed && "justify-center px-2",
             )}
           >
@@ -304,7 +330,7 @@ export function SidebarContent({
             onClick={() => startTransition(() => toggleSidebar(collapsed))}
             disabled={isPending}
             className={cn(
-              "flex w-full items-center gap-2 rounded-md px-3 py-2 text-xs text-muted-foreground hover:bg-accent/50 hover:text-foreground",
+              "flex w-full items-center gap-2 rounded-xl px-3 py-2 text-xs text-muted-foreground hover:bg-surface-elevated hover:text-foreground",
               collapsed && "justify-center px-2",
             )}
             aria-label={collapsed ? t("Expandir sidebar") : t("Recolher sidebar")}
@@ -345,7 +371,11 @@ export function Sidebar({ collapsed }: { collapsed: boolean }) {
         //
         // `shrink-0` porque item de flex encolhe por padrão, e uma barra de 60
         // espremida para caber é o mesmo defeito por outro caminho.
-        "sticky top-0 z-30 flex h-screen shrink-0 flex-col border-r bg-card transition-[width] duration-200",
+        //
+        // Flutuante (identidade lima/grafite): `top-3` + altura de `100vh - 24px`
+        // casam com o `py-3` do invólucro no AppShell, e o cartão arredondado
+        // substitui a borda direita. Continua `sticky` e ocupando lugar na linha.
+        "sticky top-3 z-30 flex h-[calc(100vh-1.5rem)] shrink-0 flex-col overflow-hidden rounded-2xl bg-surface transition-[width] duration-200",
         collapsed ? "w-16" : "w-60",
       )}
     >

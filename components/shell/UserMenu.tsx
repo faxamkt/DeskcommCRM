@@ -35,10 +35,12 @@ export function UserMenu() {
       <ThemeToggle />
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
-          <Button variant="ghost" size="icon" className="rounded-full" aria-label={t("Menu do usuário")}>
-            <Avatar className="h-8 w-8">
+          <Button variant="ghost" size="icon" className="rounded-full lg:h-10 lg:w-10" aria-label={t("Menu do usuário")}>
+            <Avatar className="h-9 w-9">
               {user.avatar_url && <AvatarImage src={user.avatar_url} alt="" />}
-              <AvatarFallback>{initials(user.full_name, user.email)}</AvatarFallback>
+              <AvatarFallback className="bg-accent-fill text-xs font-semibold text-accent-fill-foreground">
+                {initials(user.full_name, user.email)}
+              </AvatarFallback>
             </Avatar>
           </Button>
         </DropdownMenuTrigger>

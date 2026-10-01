@@ -17,7 +17,14 @@ export function AppShell({ sidebarCollapsed, children }: AppShellProps) {
   useNotifyOpenFromServiceWorker();
   return (
     <div className="flex min-h-screen w-full bg-background">
-      <div className="hidden md:block">
+      {/*
+        A barra lateral FLUTUA: é um cartão arredondado com 12px de respiro do
+        fundo (identidade lima/grafite). O respiro mora AQUI, no invólucro, e não
+        na coluna de conteúdo — o Inbox calcula a própria altura a partir do
+        `h-14` da TopBar e do `py-6` do <main> (components/inbox/InboxLayout.tsx),
+        e margem vertical na coluna entraria nessa conta sem ninguém ver.
+      */}
+      <div className="hidden md:block md:py-3 md:pl-3">
         <Sidebar collapsed={sidebarCollapsed} />
       </div>
       {/*
@@ -41,7 +48,9 @@ export function AppShell({ sidebarCollapsed, children }: AppShellProps) {
       */}
       <div className="flex min-h-screen min-w-0 flex-1 flex-col">
         <TopBar />
-        <main className="flex-1 overflow-auto p-6">{children}</main>
+        {/* `py-6` é parcela do cálculo de altura do Inbox — o horizontal é livre:
+            no celular a margem cai para 12px, que é o que a tela de 390px pede. */}
+        <main className="flex-1 overflow-auto px-3 py-6 md:pr-6 md:pl-4">{children}</main>
       </div>
     </div>
   );
