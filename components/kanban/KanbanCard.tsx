@@ -141,8 +141,8 @@ export function KanbanCard({
           // Tags saem do card (Lei A): ficam a um hover, sem ocupar altura.
           title={card.tags.length > 0 ? `Tags: ${card.tags.join(", ")}` : undefined}
           className={cn(
-            "group relative overflow-hidden rounded-md border border-border bg-surface",
-            "py-2.5 pl-3 pr-3 shadow-xs transition-colors",
+            "group relative overflow-hidden rounded-xl border border-transparent bg-surface",
+            "py-2.5 pl-3 pr-3 transition-colors",
             "hover:border-border-strong",
             snapshot.isDragging && "rotate-1 shadow-md ring-1 ring-accent/40",
             isSelected && "ring-2 ring-accent",
@@ -221,7 +221,9 @@ export function KanbanCard({
                   acessibilidade; deixar só onKeyDown daria uma ação que existe
                   e NÃO É DESCOBERTA por leitor de tela. O título como button
                   atende mouse, teclado e leitor sem desfazer a decisão antiga. */}
-              <h3 className="line-clamp-2 h-10 text-sm font-medium leading-5 text-text">
+              {/* `font-sans`: os `h1`–`h3` recebem a Outfit pelo `@layer base`, mas
+                  aqui o h3 é o NOME do lead em 14px, e a Hanken lê melhor nesse corpo. */}
+              <h3 className="line-clamp-2 h-10 font-sans text-sm font-medium leading-5 text-text">
                 <button
                   type="button"
                   onClick={(e) => {
