@@ -18,13 +18,12 @@ export function AppShell({ sidebarCollapsed, children }: AppShellProps) {
   return (
     <div className="flex min-h-screen w-full bg-background">
       {/*
-        A barra lateral FLUTUA: é um cartão arredondado com 12px de respiro do
-        fundo (identidade lima/grafite). O respiro mora AQUI, no invólucro, e não
-        na coluna de conteúdo — o Inbox calcula a própria altura a partir do
-        `h-14` da TopBar e do `py-6` do <main> (components/inbox/InboxLayout.tsx),
-        e margem vertical na coluna entraria nessa conta sem ninguém ver.
+        A barra lateral PARECE flutuar (cartão arredondado com 12px de respiro do
+        fundo), mas o respiro mora DENTRO dela, em `Sidebar.tsx` — uma medida só.
+        Pôr o respiro aqui e descontá-lo na altura de lá eram duas medidas da
+        mesma coisa (ver `tests/unit/barra-lateral-nao-flutua.test.ts`).
       */}
-      <div className="hidden md:block md:py-3 md:pl-3">
+      <div className="hidden md:block">
         <Sidebar collapsed={sidebarCollapsed} />
       </div>
       {/*

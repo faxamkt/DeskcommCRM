@@ -57,7 +57,7 @@ function BoardSkeleton() {
       {[0, 1, 2].map((c) => (
         <div
           key={c}
-          className="flex w-80 shrink-0 flex-col gap-2 rounded-2xl bg-border/45 p-3"
+          className="flex w-80 shrink-0 flex-col gap-2 rounded-2xl bg-border/45 p-3 dark:bg-surface/70"
         >
           <Skeleton className="h-5 w-32" />
           {[0, 1, 2, 3].map((i) => (

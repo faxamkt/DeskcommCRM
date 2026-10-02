@@ -372,14 +372,20 @@ export function Sidebar({ collapsed }: { collapsed: boolean }) {
         // `shrink-0` porque item de flex encolhe por padrão, e uma barra de 60
         // espremida para caber é o mesmo defeito por outro caminho.
         //
-        // Flutuante (identidade lima/grafite): `top-3` + altura de `100vh - 24px`
-        // casam com o `py-3` do invólucro no AppShell, e o cartão arredondado
-        // substitui a borda direita. Continua `sticky` e ocupando lugar na linha.
-        "sticky top-3 z-30 flex h-[calc(100vh-1.5rem)] shrink-0 flex-col overflow-hidden rounded-2xl bg-surface transition-[width] duration-200",
-        collapsed ? "w-16" : "w-60",
+        // A APARÊNCIA flutuante (identidade lima/grafite) não muda nada disso: o
+        // `<aside>` continua `sticky top-0 h-screen` e ocupando lugar na linha. O
+        // respiro de 12px é PADDING dele, e o cartão arredondado é o filho que
+        // preenche o que sobra — a altura do cartão sai da mesma caixa, sem um
+        // `calc(100vh - X)` que precisaria concordar com um X declarado em outro
+        // arquivo. As larguras somam o respiro: 252 = 12 + 240 e 76 = 12 + 64,
+        // então o cartão tem as mesmas 240/64 de antes.
+        "sticky top-0 z-30 flex h-screen shrink-0 flex-col py-3 pl-3 transition-[width] duration-200",
+        collapsed ? "w-[76px]" : "w-[252px]",
       )}
     >
-      <SidebarContent collapsed={collapsed} />
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl bg-surface">
+        <SidebarContent collapsed={collapsed} />
+      </div>
     </aside>
   );
 }

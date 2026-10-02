@@ -95,7 +95,10 @@ export function StageColumn({
     // Coluna = faixa rebaixada do fundo (identidade lima/grafite), sem borda: os
     // cartões claros é que sobem dela. `bg-surface-muted` não existia como token
     // — a classe antiga não pintava nada, e a coluna dependia só da borda.
-    <div className="flex w-80 shrink-0 flex-col rounded-2xl bg-border/45">
+    // No escuro a relação se inverte de propósito: a coluna fica ABAIXO do cartão
+    // (`surface/70` sobre o fundo) e o cartão sobe para `surface-elevated`. Com a
+    // mesma receita do claro, coluna (≈#1e1e1c) e cartão (#1b1b19) empatavam.
+    <div className="flex w-80 shrink-0 flex-col rounded-2xl bg-border/45 dark:bg-surface/70">
       <div className="group/etapa flex items-center gap-2 px-3 pt-3 pb-2">
         {/* "Selecionar a etapa inteira" é o gesto que faz a ação em lote valer a
             pena: sem ele, mover trinta cards deixa de ser trinta arrastes e vira

@@ -141,7 +141,7 @@ export function KanbanCard({
           // Tags saem do card (Lei A): ficam a um hover, sem ocupar altura.
           title={card.tags.length > 0 ? `Tags: ${card.tags.join(", ")}` : undefined}
           className={cn(
-            "group relative overflow-hidden rounded-xl border border-transparent bg-surface",
+            "group relative overflow-hidden rounded-xl border border-transparent bg-surface dark:bg-surface-elevated",
             "py-2.5 pl-3 pr-3 transition-colors",
             "hover:border-border-strong",
             snapshot.isDragging && "rotate-1 shadow-md ring-1 ring-accent/40",

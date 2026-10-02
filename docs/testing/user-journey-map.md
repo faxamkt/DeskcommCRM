@@ -395,6 +395,22 @@ ao cliente dele, e a tela de acesso é a primeira coisa que qualquer usuário v�
 | J10.6 | O instalador pergunta a cor da marca | `APP_ACCENT_HEX` no `install.sh`, com validação — o revendedor não recebe o verde do produto | PASS (`tests/shell/`) |
 | J10.7 | Nome com apóstrofo (`Sant'Ana Odontologia`) | o `.env` sobrevive: 18/18 nos três consumidores de compose | PASS |
 | J10.8 | Cor escura de marca não quebra o contraste | o anel de foco respeita o piso de 3:1 em ambos os temas | PASS (unit) |
+| J10.9 | Identidade lima/grafite **sem** marca configurada | botão primário lima com texto grafite (13,43:1), Outfit nos títulos e Hanken no texto, nos dois temas | PASS (prova isolada¹) |
+| J10.10 | A mesma tela **com** marca (`APP_ACCENT_HEX=#2563eb`) | o lima não vaza: botão sólido na cor da marca (7,27:1 claro · 7,73:1 escuro), destaque do menu ativo no accent escuro dela (6,35:1 · 5,23:1 sobre grafite) | PASS (prova isolada¹) |
+| J10.11 | Barra lateral flutuante em 1280×900 | o menu não rola e nenhum grupo fica abaixo da dobra — folga real de 20px (era 19px antes da identidade) | PASS (prova isolada¹) |
+| J10.12 | Casca, Inbox e Funil em 1440×900 e 390×844, claro e escuro | estouro horizontal 0 e console sem erro nas 36 combinações medidas | PASS (prova isolada¹) |
+
+¹ **Prova isolada, não jornada real** (2026-10-01): build de produção (`next build` +
+`next start`) renderizando os componentes REAIS da casca (`AppShell`, `Sidebar`,
+`TopBar`), `ConversationListItem`, `MessageBubble` e `StageColumn` com dados
+fictícios, numa página local que não foi commitada — o Docker da máquina não
+alcançava o Docker Hub, então não houve Supabase local nem login. Medido por
+`getComputedStyle`/`getBoundingClientRect`; evidência em
+`.superpowers/evidence/identidade-visual/{produto,marca-azul}/` (capturas +
+`medidas.json` + `medir.mjs`). **Falta** a mesma medida nas telas autenticadas
+de verdade (Inbox e Funis com dados do banco) e a suíte e2e — ver o PR.
+A primeira rodada achou e corrigiu um defeito: no tema escuro o cartão do funil
+(`#1b1b19`) empatava com a coluna (≈`#1e1e1c`).
 
 **Bug de produto achado ao executar (2026-08-14), e é o que justifica esta jornada
 existir.** O caso J10.1 reprovou no CI, e não por defeito do teste: quem sobe o

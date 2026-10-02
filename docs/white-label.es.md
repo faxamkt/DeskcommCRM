@@ -1,4 +1,4 @@
-<!-- traduzido-de: docs/white-label.md@e1d374bb48e0 -->
+<!-- traduzido-de: docs/white-label.md@6888a1b24fee -->
 
 [🇧🇷 Português](white-label.md) · [🇺🇸 English](white-label.en.md) · 🇪🇸 Español
 
@@ -79,7 +79,9 @@ Esto no vuelve obsoleta la instalación dedicada — ver la comparación de abaj
 Directo, para que no lo descubras delante del cliente. Cada línea trae la razón medida, no la excusa:
 
 - **Dominio por organización.** Una instalación, un dominio. No hay columna de dominio en el esquema, la bifurcación por host en `proxy.ts` es un NOOP declarado (existe solo como documentación de la topología pretendida), y en el Edge no hay base de datos que consultar antes de decidir a quién pertenece ese host. El cliente que exige su propio dominio pide **instalación dedicada**.
-- **Tipografía.** La tipografía es la misma en toda instalación. `next/font` resuelve en tiempo de **build**, y la imagen que baja tu VPS ya viene construida — un selector de fuente en el panel guardaría un valor que nadie leería. (La fuente es la Atkinson Hyperlegible, elegida por el Braille Institute por legibilidad; cambiarla no altera la percepción de marca y empeora la lectura de quien pasa el día dentro del sistema.)
+- **Tipografía.** La tipografía es la misma en toda instalación. `next/font` resuelve en tiempo de **build**, y la imagen que baja tu VPS ya viene construida — un selector de fuente en el panel guardaría un valor que nadie leería. (Desde la identidad lima/grafito son dos: Outfit en títulos y números, Hanken Grotesk en el texto — archivos locales en `app/fonts/`, SIL OFL 1.1, licencia en `public/licenses/fonts-OFL.txt`. Para comprobarlo sin confiar en esta línea: `grep -n localFont -A4 app/layout.tsx`.)
+
+- **Botón primario e ítem activo del menú.** El producto pinta las acciones con lima (`--color-accent-fill`) y el ítem activo con grafito + lima (`--color-ink-accent`). Con un color de marca configurado, ambos siguen a la marca: el botón vuelve a ser sólido en su color y el destaque del menú usa el tono que la derivación eligió para fondo oscuro. Una marca acromática (gris, negro, blanco) mantiene la lima. Fuente: `lib/branding/css.ts`.
 - **Tema.** El par claro/oscuro es del design system. Tu marca mueve el **accent** — lo que es acción, destaque y foco — y deliberadamente **no** mueve el fondo de la página: el fondo es el mismo en toda marca, y por eso el color de la barra del navegador también.
 - **El informe de LGPD del titular no lleva tu marca — y es a propósito.** Ver la sección propia más abajo.
 - **La alarma de presupuesto de IA** todavía sale con nuestra marca. Es la única fuga conocida, y se queda: hoy esa alarma no tiene ninguna programación conectada, así que arreglar su marca no cambiaría nada que alguien vea. Sale cuando la alarma tenga un cron de verdad.

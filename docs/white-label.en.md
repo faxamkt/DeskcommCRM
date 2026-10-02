@@ -1,4 +1,4 @@
-<!-- traduzido-de: docs/white-label.md@e1d374bb48e0 -->
+<!-- traduzido-de: docs/white-label.md@6888a1b24fee -->
 
 [🇧🇷 Português](white-label.md) · 🇺🇸 English · [🇪🇸 Español](white-label.es.md)
 
@@ -79,7 +79,9 @@ This does not make the dedicated installation obsolete — see the comparison be
 Straight to the point, so that you do not find out in front of the client. Each line carries the measured reason, not the excuse:
 
 - **Domain per organization.** One installation, one domain. There is no domain column in the schema, the host-based branching in `proxy.ts` is a declared NOOP (it exists only as documentation of the intended topology), and at the Edge there is no database to query before deciding whom that host belongs to. A client who demands their own domain is asking for a **dedicated installation**.
-- **Font.** Typography is the same in every installation. `next/font` resolves at **build** time, and the image your VPS downloads already arrives built — a font picker in the panel would save a value that nothing would read. (The font is Atkinson Hyperlegible, chosen by the Braille Institute for legibility; swapping it does not change brand perception and makes reading worse for whoever spends the day inside the system.)
+- **Font.** Typography is the same in every installation. `next/font` resolves at **build** time, and the image your VPS downloads already arrives built — a font picker in the panel would save a value that nothing would read. (Since the lime/graphite identity there are two: Outfit for headings and numbers, Hanken Grotesk for text — local files in `app/fonts/`, SIL OFL 1.1, license in `public/licenses/fonts-OFL.txt`. To check without trusting this line: `grep -n localFont -A4 app/layout.tsx`.)
+
+- **Primary button and active menu item.** The product paints actions with lime (`--color-accent-fill`) and the active item with graphite + lime (`--color-ink-accent`). With a brand color configured, both follow the brand: the button goes back to solid in its color and the menu highlight uses the shade the derivation chose for dark backgrounds. An achromatic brand (gray, black, white) keeps the lime. Source: `lib/branding/css.ts`.
 - **Theme.** The light/dark pair belongs to the design system. Your brand moves the **accent** — what is action, highlight and focus — and deliberately does **not** move the page background: the background is the same under every brand, and that is why the browser bar color is too.
 - **The LGPD data-subject report does not carry your brand — and that is on purpose.** See its own section below.
 - **The AI budget alarm** still goes out with our brand. It is the only known leak, and it stays: today that alarm has no schedule wired to it at all, so fixing its brand would change nothing anyone sees. It goes out when the alarm gets a real cron.
