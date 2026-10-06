@@ -106,6 +106,7 @@ export function MessageBubble({ message, debugCitations, onResponder, citada }: 
         </button>
       )}
       <div
+        data-slot="bolha"
         className={cn(
           "max-w-[75%] text-sm",
           isBareSticker
