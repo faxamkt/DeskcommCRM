@@ -58,7 +58,7 @@ describe("DocumentCard", () => {
         mime="application/pdf"
         sizeBytes={3179614}
         storagePath="org/conv/m5.pdf"
-        isOutbound={false}
+       
       />,
     );
     expect(screen.getByText("PDF")).toBeInTheDocument();

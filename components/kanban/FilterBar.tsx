@@ -114,7 +114,7 @@ export function FilterBar({ filters, onChange, leads }: FilterBarProps) {
   const tagLabel = filters.tag ?? t("Tag: todas");
 
   return (
-    <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border bg-surface p-2">
+    <div className="flex flex-wrap items-center gap-2 rounded-2xl bg-surface p-2">
       <Input
         type="search"
         placeholder={t("Buscar por título…")}

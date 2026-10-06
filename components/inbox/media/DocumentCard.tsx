@@ -10,11 +10,10 @@ interface Props {
   mime: string | null;
   sizeBytes: number | null;
   storagePath: string | null;
-  isOutbound: boolean;
 }
 
 /** Card de documento: rótulo (PDF/MP4/…), tamanho e download. */
-export function DocumentCard({ messageId, mime, sizeBytes, storagePath, isOutbound }: Props) {
+export function DocumentCard({ messageId, mime, sizeBytes, storagePath }: Props) {
   const t = useT();
   const label = mediaFileLabel(mime, storagePath);
   return (
@@ -25,15 +24,15 @@ export function DocumentCard({ messageId, mime, sizeBytes, storagePath, isOutbou
       aria-label={`${t("Baixar")} ${label} (${formatBytes(sizeBytes)})`}
       className={cn(
         "flex w-60 items-center gap-3 rounded-lg p-2 transition-colors",
-        isOutbound
-          ? "bg-primary-foreground/10 hover:bg-primary-foreground/20"
-          : "bg-background/60 hover:bg-background",
+        // A bolha enviada é clara desde a identidade lima/grafite: mesma tinta
+        // nas duas direções.
+        "bg-background/60 hover:bg-background",
       )}
     >
       <span
         className={cn(
           "flex h-10 w-10 shrink-0 items-center justify-center rounded-lg",
-          isOutbound ? "bg-primary-foreground/20" : "bg-primary/10 text-primary",
+          "bg-primary/10 text-primary",
         )}
       >
         <FileText size={20} weight="duotone" aria-hidden />

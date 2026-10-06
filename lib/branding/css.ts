@@ -169,6 +169,35 @@ function declaracoesDoTema(cor: CorResolvida, tema: "claro" | "escuro"): Declara
     ["--color-accent-hover", t.accentHover],
     ["--color-accent-soft", t.accentSoft],
   );
+
+  // ── O preenchimento de destaque segue a MARCA, não o lima do produto ────────
+  //
+  // O `globals.css` separa dois papéis que até a identidade lima/grafite eram um
+  // só: `--color-accent` (texto/borda/anel, legível sobre o fundo) e
+  // `--color-accent-fill` (preenchimento de ação, legível pelo texto POR CIMA).
+  // No produto o segundo é o lima literal. Numa instalação com marca, deixá-lo
+  // literal pintaria o botão primário de lima na tela de quem escolheu azul — a
+  // marca do cliente perderia justamente a superfície em que ela mais aparece.
+  //
+  // Apontar para o accent devolve o comportamento de ANTES da identidade nova,
+  // byte a byte no pixel: botão sólido na cor da marca, frente calculada.
+  //
+  // `--color-ink-accent` é o destaque sobre a superfície grafite (item ativo do
+  // menu). A cor da marca no tema CLARO pode não ler sobre grafite (navy sobre
+  // grafite some), então ele recebe o accent do tema ESCURO, nos dois blocos: a
+  // derivação já o escolheu para passar sobre superfície escura.
+  //
+  // Só quando a rampa veio da SEMENTE. Marca acromática (cinza, preto, branco)
+  // mantém a rampa do produto como accent (`marca_acromatica`), e o lima é parte
+  // dessa mesma identidade: apontá-lo para `var(--color-accent)` trocaria o lima
+  // pelo oliva de texto sem a marca ter pedido cor nenhuma.
+  if (derivada.origemDaRampa !== "semente") return saida;
+  saida.push(
+    ["--color-accent-fill", "var(--color-accent)"],
+    ["--color-accent-fill-fg", "var(--color-accent-fg)"],
+    ["--color-accent-fill-hover", "var(--color-accent-hover)"],
+    ["--color-ink-accent", derivada.escuro.accent],
+  );
   return saida;
 }
 

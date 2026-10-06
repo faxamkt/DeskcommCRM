@@ -106,15 +106,26 @@ export function MessageBubble({ message, debugCitations, onResponder, citada }: 
         </button>
       )}
       <div
+        data-slot="bolha"
         className={cn(
           "max-w-[75%] text-sm",
           isBareSticker
             ? "px-0 py-0"
             : cn(
-                "rounded-2xl px-3 py-2 shadow-sm",
+                // Identidade lima/grafite: a bolha ENVIADA é a superfície suave do
+                // accent (`--color-accent-soft`) com texto escuro, não mais o
+                // accent sólido com texto branco. Com marca, o soft é derivado
+                // da cor da marca (lib/branding/css.ts), então a bolha continua
+                // na família da marca. E, sendo clara, os filhos dela (citação,
+                // hora, áudio, documento) usam as MESMAS classes da recebida —
+                // o ramo `isOutbound` deles deixou de pintar branco.
+                "rounded-[18px] px-3 py-2",
                 isOutbound
-                  ? "rounded-br-sm bg-primary text-primary-foreground"
-                  : "rounded-bl-sm bg-muted text-foreground",
+                  ? "rounded-br-[4px] bg-accent-soft text-text"
+                  // `bg-border/70` e não `surface-elevated`: a thread mora no
+                  // cartão claro (`--color-surface`), e o `-elevated` (#eeede9)
+                  // sumia sobre ele. Medido como pixel: ≈ #e6e5e0 no claro.
+                  : "rounded-bl-[4px] bg-border/70 text-foreground",
               ),
           isFailed && "border border-destructive",
         )}
@@ -129,9 +140,7 @@ export function MessageBubble({ message, debugCitations, onResponder, citada }: 
           <div
             className={cn(
               "mb-1 rounded-md border-l-2 px-2 py-1 text-xs",
-              isOutbound
-                ? "border-primary-foreground/50 bg-primary-foreground/10"
-                : "border-primary bg-background/60",
+              "border-primary bg-background/60",
             )}
           >
             <div className="font-medium opacity-80">
@@ -193,7 +202,7 @@ export function MessageBubble({ message, debugCitations, onResponder, citada }: 
         <div
           className={cn(
             "mt-1 flex items-center justify-end gap-1 text-[10px]",
-            isOutbound ? "text-primary-foreground" : "text-muted-foreground",
+            "text-muted-foreground",
           )}
         >
           {editada && (

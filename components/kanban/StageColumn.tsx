@@ -92,8 +92,14 @@ export function StageColumn({
     : undefined;
 
   return (
-    <div className="flex w-80 shrink-0 flex-col rounded-lg border border-border bg-surface-muted/40">
-      <div className="group/etapa flex items-center gap-2 border-b border-border px-3 py-2.5">
+    // Coluna = faixa rebaixada do fundo (identidade lima/grafite), sem borda: os
+    // cartões claros é que sobem dela. `bg-surface-muted` não existia como token
+    // — a classe antiga não pintava nada, e a coluna dependia só da borda.
+    // No escuro a relação se inverte de propósito: a coluna fica ABAIXO do cartão
+    // (`surface/70` sobre o fundo) e o cartão sobe para `surface-elevated`. Com a
+    // mesma receita do claro, coluna (≈#1e1e1c) e cartão (#1b1b19) empatavam.
+    <div className="flex w-80 shrink-0 flex-col rounded-2xl bg-border/45 dark:bg-surface/70">
+      <div className="group/etapa flex items-center gap-2 px-3 pt-3 pb-2">
         {/* "Selecionar a etapa inteira" é o gesto que faz a ação em lote valer a
             pena: sem ele, mover trinta cards deixa de ser trinta arrastes e vira
             trinta cliques com modificador. Fica no cabeçalho porque é ali que a
@@ -128,7 +134,7 @@ export function StageColumn({
           style={accentStyle}
           aria-hidden
         />
-        <h2 className="flex-1 truncate text-sm font-semibold text-text">
+        <h2 className="flex-1 truncate font-display text-base font-medium text-text">
           {stage.name}
         </h2>
         <span className="rounded-full bg-surface px-2 py-0.5 text-[11px] font-medium tabular-nums text-text-muted">
@@ -137,7 +143,7 @@ export function StageColumn({
       </div>
 
       {totalCents > 0 && (
-        <div className="border-b border-border px-3 py-1.5 text-[11px] tabular-nums text-text-muted">
+        <div className="px-3 pb-1.5 text-[11px] tabular-nums text-text-muted">
           {formatBRL(totalCents)}
         </div>
       )}
@@ -149,7 +155,7 @@ export function StageColumn({
             {...provided.droppableProps}
             className={cn(
               "flex flex-1 flex-col gap-2 p-2 transition-colors",
-              snapshot.isDraggingOver && "bg-accent/5",
+              snapshot.isDraggingOver && "rounded-b-2xl bg-accent-soft/60",
             )}
           >
             {leads.map((lead, idx) => (

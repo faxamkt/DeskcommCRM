@@ -28,8 +28,8 @@ const CSS = fs.readFileSync(path.join(RAIZ, "app/globals.css"), "utf8");
  *
  * Copiar à mão criaria uma segunda fonte da verdade que envelhece em silêncio: quem
  * mexesse na paleta do design system veria este teste verde contra a paleta de ontem, e
- * a catraca deixaria de calibrar contra a régua. Lendo do arquivo, mudar a Sage quebra
- * este teste — que é exatamente o aviso que se quer.
+ * a catraca deixaria de calibrar contra a régua. Lendo do arquivo, mudar a paleta do
+ * produto quebra este teste — que é exatamente o aviso que se quer.
  */
 /**
  * O bloco `:root` sai por casamento de chaves, e não por `slice` entre duas
@@ -48,7 +48,7 @@ function blocoRoot(css: string): string {
   return css.slice(i, fim);
 }
 
-function stopsSageDoCss(): string[] {
+function stopsDoProdutoNoCss(): string[] {
   const raiz = blocoRoot(CSS);
   return GRAUS.map((g) => {
     const m = new RegExp(`--color-accent-${g}:\\s*(#[0-9a-f]{6})`, "i").exec(raiz);
@@ -103,23 +103,40 @@ describe("conversões de cor", () => {
 });
 
 describe("rampaDeSemente — catraca de calibração contra o design system", () => {
-  const esperados = stopsSageDoCss();
+  const esperados = stopsDoProdutoNoCss();
 
   it("lê 11 stops distintos do globals.css (guarda de vacuidade)", () => {
     // Sem isto, um regex quebrado devolveria lista vazia e a comparação abaixo passaria
     // por não ter o que comparar — instrumento morto tem cara de teste verde.
     expect(esperados).toHaveLength(11);
     expect(new Set(esperados).size).toBe(11);
-    expect(esperados[K]).toBe("#506d48");
+    expect(esperados[K]).toBe("#596d04");
   });
 
-  it("reproduz os 11 stops Sage a partir de #506d48 com Δ ≤ 2/255 por canal", () => {
-    const derivada = rampaDeSemente("#506d48");
+  it("reproduz os 11 stops do produto a partir de #596d04 com Δ ≤ 2/255 por canal", () => {
+    // A rampa do produto (identidade lima/grafite) FOI gerada por esta função, então
+    // o Δ hoje é 0. O teste continua valendo pelo sentido inverso: quem editar um stop
+    // à mão no globals.css desalinha o produto da escada que toda marca recebe.
+    const derivada = rampaDeSemente("#596d04");
     const distancias = esperados.map((esperado, i) => distanciaPorCanal(esperado, derivada[i]!));
     expect(
       Math.max(...distancias),
       `derivada: ${derivada.join(" ")}\nesperada: ${esperados.join(" ")}\nΔ: ${distancias.join(",")}`,
     ).toBeLessThanOrEqual(2);
+  });
+
+  it("a escada continua calibrada contra a Sage desenhada à mão", () => {
+    // `ESCADA_L` e `CURVA_C` foram MEDIDAS na Sage, que era desenhada à mão e era a
+    // paleta do produto até a identidade lima/grafite (2026-10). Com a paleta nova
+    // gerada pela própria função, o teste acima ficou circular para a FORMA da escada
+    // — então a calibração original fica aqui, congelada, como a régua de origem.
+    const SAGE = [
+      "#f3f6f1", "#e4ebe0", "#c8d6c1", "#a4ba9a", "#82a077", "#67885d",
+      "#506d48", "#41573b", "#374731", "#2f3c2b", "#171f15",
+    ];
+    const derivada = rampaDeSemente("#506d48");
+    const distancias = SAGE.map((esperado, i) => distanciaPorCanal(esperado, derivada[i]!));
+    expect(Math.max(...distancias), `Δ: ${distancias.join(",")}`).toBeLessThanOrEqual(2);
   });
 
   it("devolve o hex LITERAL no stop da semente", () => {
@@ -185,7 +202,7 @@ describe("ancoragem por PAPEL, não por lightness", () => {
 describe("forma da escada", () => {
   it("mantém as constantes na forma que a derivação assume", () => {
     // Sabotar qualquer uma destas quebra a calibração acima; estas asserções existem
-    // para dizer QUAL invariante quebrou, e não só que "a Sage não bate mais".
+    // para dizer QUAL invariante quebrou, e não só que "a calibração não bate mais".
     expect(ESCADA_L).toHaveLength(11);
     expect(CURVA_C).toHaveLength(11);
     expect(CURVA_C[K]).toBe(1);

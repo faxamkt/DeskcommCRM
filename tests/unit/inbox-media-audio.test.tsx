@@ -17,21 +17,21 @@ beforeAll(() => {
 
 describe("AudioPlayer", () => {
   it("renderiza com src do endpoint e controles", () => {
-    render(<AudioPlayer messageId="m3" isOutbound={false} />);
+    render(<AudioPlayer messageId="m3" />);
     expect(screen.getByRole("button", { name: /reproduzir/i })).toBeInTheDocument();
     expect(screen.getByRole("slider", { name: /progresso/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /velocidade/i })).toHaveTextContent("1x");
   });
 
   it("alterna play/pause", () => {
-    render(<AudioPlayer messageId="m3" isOutbound={false} />);
+    render(<AudioPlayer messageId="m3" />);
     const btn = screen.getByRole("button", { name: /reproduzir/i });
     fireEvent.click(btn);
     expect(screen.getByRole("button", { name: /pausar/i })).toBeInTheDocument();
   });
 
   it("cicla a velocidade 1x → 1.5x → 2x → 1x", () => {
-    render(<AudioPlayer messageId="m3" isOutbound={false} />);
+    render(<AudioPlayer messageId="m3" />);
     const rate = screen.getByRole("button", { name: /velocidade/i });
     fireEvent.click(rate);
     expect(rate).toHaveTextContent("1.5x");
@@ -42,7 +42,7 @@ describe("AudioPlayer", () => {
   });
 
   it("resiliente a duration Infinity (OGG stream): max=1 fallback, healing ao refinar", async () => {
-    const { container } = render(<AudioPlayer messageId="m3" isOutbound={false} />);
+    const { container } = render(<AudioPlayer messageId="m3" />);
     const input = screen.getByRole("slider");
 
     // Simula OGG report Infinity
@@ -69,7 +69,7 @@ describe("AudioPlayer", () => {
   });
 
   it("erro ao carregar exibe MediaUnavailable", async () => {
-    const { container } = render(<AudioPlayer messageId="m3" isOutbound={false} />);
+    const { container } = render(<AudioPlayer messageId="m3" />);
     const audio = container.querySelector("audio") as HTMLAudioElement;
     act(() => {
       audio.dispatchEvent(new Event("error"));

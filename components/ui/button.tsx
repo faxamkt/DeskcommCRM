@@ -5,20 +5,27 @@ import { cva, type VariantProps } from "class-variance-authority";
 import { cn } from "@/lib/utils";
 
 /**
- * Button — Sage design system.
+ * Button — identidade lima/grafite.
  * Variants:
- *   - primary (default): accent fill, branded CTA
- *   - secondary: surface-elevated com border, ação neutra
- *   - ghost: transparent, hover suave (toolbar/inline)
+ *   - primary (default): pílula de PREENCHIMENTO (`--color-accent-fill`): lima
+ *     com texto grafite no produto, a cor da marca com frente calculada numa
+ *     instalação com marca (lib/branding/css.ts aponta o fill para o accent).
+ *   - secondary: pílula neutra sobre superfície rebaixada, ação comum
+ *   - ghost: transparente, hover suave (toolbar/inline)
  *   - destructive: error fill (delete/cancel destrutivo)
  *   - outline: alias de secondary com background transparente (compat shadcn)
- *   - link: text-only com underline
+ *   - link: text-only com underline, na cor de TEXTO do accent (legível)
  *   - default: alias de primary (compat shadcn)
+ *
+ * Por que o primário NÃO é `bg-accent`: o accent é o papel de texto/borda/anel e
+ * no produto é um oliva escuro (4,7:1 sobre o fundo). O lima não lê como texto
+ * (1,04:1), mas é ótimo como fundo de botão — quem carrega a leitura é o grafite
+ * por cima dele (13,4:1). Ver o bloco "Identidade" no `:root` do globals.css.
  */
 const buttonVariants = cva(
   [
     "inline-flex items-center justify-center gap-2 whitespace-nowrap",
-    "rounded-sm font-medium",
+    "rounded-full font-semibold",
     "transition-[background-color,border-color,color,box-shadow,transform]",
     "duration-fast ease-out",
     "focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-accent-500 focus-visible:ring-offset-2 focus-visible:ring-offset-bg",
@@ -30,17 +37,17 @@ const buttonVariants = cva(
     variants: {
       variant: {
         primary:
-          "bg-accent text-accent-foreground hover:bg-accent-hover shadow-xs",
+          "bg-accent-fill text-accent-fill-foreground hover:bg-accent-fill-hover",
         default:
-          "bg-accent text-accent-foreground hover:bg-accent-hover shadow-xs",
+          "bg-accent-fill text-accent-fill-foreground hover:bg-accent-fill-hover",
         secondary:
-          "bg-surface-elevated text-text border border-border hover:border-accent hover:text-accent",
+          "bg-surface-elevated text-text border border-border hover:border-border-strong hover:bg-surface",
         outline:
-          "bg-transparent text-text border border-border hover:border-accent hover:text-accent",
+          "bg-transparent text-text border border-border hover:border-border-strong hover:bg-surface-elevated",
         ghost:
-          "bg-transparent text-text hover:bg-accent-soft hover:text-accent",
+          "bg-transparent text-text hover:bg-surface-elevated",
         destructive:
-          "bg-error text-white hover:brightness-95 shadow-xs",
+          "bg-error text-white hover:brightness-95",
         link:
           "bg-transparent text-accent underline underline-offset-4 decoration-1 hover:decoration-2 h-auto p-0",
       },

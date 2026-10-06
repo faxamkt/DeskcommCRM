@@ -17,6 +17,12 @@ export function AppShell({ sidebarCollapsed, children }: AppShellProps) {
   useNotifyOpenFromServiceWorker();
   return (
     <div className="flex min-h-screen w-full bg-background">
+      {/*
+        A barra lateral PARECE flutuar (cartão arredondado com 12px de respiro do
+        fundo), mas o respiro mora DENTRO dela, em `Sidebar.tsx` — uma medida só.
+        Pôr o respiro aqui e descontá-lo na altura de lá eram duas medidas da
+        mesma coisa (ver `tests/unit/barra-lateral-nao-flutua.test.ts`).
+      */}
       <div className="hidden md:block">
         <Sidebar collapsed={sidebarCollapsed} />
       </div>
@@ -41,7 +47,9 @@ export function AppShell({ sidebarCollapsed, children }: AppShellProps) {
       */}
       <div className="flex min-h-screen min-w-0 flex-1 flex-col">
         <TopBar />
-        <main className="flex-1 overflow-auto p-6">{children}</main>
+        {/* `py-6` é parcela do cálculo de altura do Inbox — o horizontal é livre:
+            no celular a margem cai para 12px, que é o que a tela de 390px pede. */}
+        <main className="flex-1 overflow-auto px-3 py-6 md:pr-6 md:pl-4">{children}</main>
       </div>
     </div>
   );

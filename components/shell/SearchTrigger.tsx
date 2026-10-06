@@ -16,15 +16,19 @@ export function SearchTrigger() {
 
   return (
     <>
+      {/* Pílula larga sobre o fundo, como a busca da identidade: no desktop ela
+          ocupa a faixa central inteira e convida a digitar; no celular encolhe
+          para o ícone, que é o que cabe ao lado do menu e do avatar. */}
       <Button
-        variant="outline"
+        variant="ghost"
         size="sm"
-        className="gap-2 text-muted-foreground"
+        className="w-11 justify-center gap-3 bg-surface px-0 font-normal text-muted-foreground hover:bg-surface md:w-full md:justify-start md:px-5 lg:h-10"
         onClick={() => setOpen(true)}
+        aria-label={t("Buscar...")}
       >
-        <MagnifyingGlass size={14} aria-hidden />
+        <MagnifyingGlass size={16} aria-hidden />
         <span className="hidden md:inline">{t("Buscar...")}</span>
-        <kbd className="ml-2 hidden md:inline rounded-md border bg-muted px-1.5 py-0.5 text-[10px]">⌘K</kbd>
+        <kbd className="ml-auto hidden rounded-md border bg-surface-elevated px-1.5 py-0.5 text-[10px] md:inline">⌘K</kbd>
       </Button>
       <CommandPalette open={open} onOpenChange={setOpen} />
     </>

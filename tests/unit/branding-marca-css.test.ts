@@ -99,9 +99,45 @@ describe("serialização — os dois blocos", () => {
         "--color-accent-fg",
         "--color-accent-hover",
         "--color-accent-soft",
+        "--color-accent-fill",
+        "--color-accent-fill-fg",
+        "--color-accent-fill-hover",
+        "--color-ink-accent",
       ].sort(),
     );
     expect(claro["--color-brand"]).toBe("#2563eb");
+  });
+
+  it("o preenchimento de destaque segue a marca, e o destaque sobre grafite também", () => {
+    // Sem isto, a identidade lima/grafite pintaria o botão primário de lima na
+    // instalação que escolheu azul: `--color-accent-fill` é LITERAL no globals.css.
+    for (const hex of ["#2563eb", "#0f172a", "#f5c518"]) {
+      const blocos = lerBlocos(cssDaMarca(corDe(hex)).css ?? "");
+      const escuroAccent = blocos[':root:root[data-theme="dark"]']?.["--color-accent"];
+      for (const seletor of [":root:root", ':root:root[data-theme="dark"]']) {
+        const bloco = blocos[seletor] ?? {};
+        expect(bloco["--color-accent-fill"], `${hex} ${seletor}`).toBe("var(--color-accent)");
+        expect(bloco["--color-accent-fill-fg"], `${hex} ${seletor}`).toBe("var(--color-accent-fg)");
+        expect(bloco["--color-accent-fill-hover"], `${hex} ${seletor}`).toBe(
+          "var(--color-accent-hover)",
+        );
+        // O destaque sobre grafite é o accent do tema ESCURO nos dois blocos: é o
+        // stop que a derivação já escolheu para passar sobre superfície escura. A
+        // navy do tema claro sumiria no item ativo do menu.
+        expect(bloco["--color-ink-accent"], `${hex} ${seletor}`).toBe(escuroAccent);
+      }
+    }
+  });
+
+  it("marca acromática não toca no preenchimento: o lima do produto permanece", () => {
+    // Coerente com `marca_acromatica`: o accent do produto fica, então o
+    // preenchimento do produto fica junto — emitir `var(--color-accent)` aqui
+    // trocaria o lima pelo oliva do texto sem a marca ter pedido nada.
+    for (const hex of ["#808080", "#ffffff", "#000000"]) {
+      const bloco = lerBlocos(cssDaMarca(corDe(hex)).css ?? "")[":root:root"] ?? {};
+      expect(bloco["--color-accent-fill"], hex).toBeUndefined();
+      expect(bloco["--color-ink-accent"], hex).toBeUndefined();
+    }
   });
 
   it("o valor por tema difere — senão a alternância estaria morta", () => {
