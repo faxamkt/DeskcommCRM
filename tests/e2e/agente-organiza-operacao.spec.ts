@@ -140,7 +140,7 @@ async function agenteChama(
  */
 function cardDe(locator: Locator): Locator {
   return locator.locator(
-    "xpath=ancestor::div[contains(concat(' ', normalize-space(@class), ' '), ' border-border ')][1]",
+    "xpath=ancestor::div[@data-slot='card'][1]",
   );
 }
 

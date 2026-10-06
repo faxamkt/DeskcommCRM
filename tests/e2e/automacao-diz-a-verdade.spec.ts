@@ -61,7 +61,7 @@ const RULE_NAME = `E2E Abordar ${ts}`;
 const LEAD_NAME = `Carlos Verdade ${ts}`;
 
 /**
- * Sobe do texto até o CARD do design system (o container com `border-border`).
+ * Sobe do texto até o CARD do design system (o container com `data-slot="card"`).
  *
  * Mesmo helper de `webhooks.spec.ts`, e a razão de ele existir foi medida aqui:
  * `locator("div").filter({ has: texto }).last()` devolve o div mais INTERNO que
@@ -70,7 +70,7 @@ const LEAD_NAME = `Carlos Verdade ${ts}`;
  */
 function cardDe(locator: Locator): Locator {
   return locator.locator(
-    "xpath=ancestor::div[contains(concat(' ', normalize-space(@class), ' '), ' border-border ')][1]",
+    "xpath=ancestor::div[@data-slot='card'][1]",
   );
 }
 

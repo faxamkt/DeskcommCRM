@@ -61,11 +61,11 @@ const RULE_NAME = `E2E Automação ${ts}`;
 const LEAD_NAME = `Ana E2E ${ts}`;
 const TAG = "e2e-tag";
 
-// Card do design system (Card/CardHeader) — mesmas classes em toda a app.
+// Card do design system — marcado com data-slot="card" (contrato estável, não classe visual).
 // Sobe do texto (título) até o container do card pra escopar asserções vizinhas.
 function cardOf(locator: Locator): Locator {
   return locator.locator(
-    "xpath=ancestor::div[contains(concat(' ', normalize-space(@class), ' '), ' border-border ')][1]",
+    "xpath=ancestor::div[@data-slot='card'][1]",
   );
 }
 

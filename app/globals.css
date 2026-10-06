@@ -228,7 +228,7 @@
    * sete, e o croma fica limitado a 0.13 porque este produto é para quem
    * encara a tela oito horas por dia — a Okabe-Ito não tem essa restrição.
    *
-   * Os matizes (30 70 100 190 225 262 300 340) são espalhados de propósito, e
+   * Os matizes (30 70 100 180 228 262 300 340) são espalhados de propósito, e
    * não pelo que maximiza a distância: uma busca livre chegou a 0.1155 pondo
    * TRÊS trilhas na faixa dos roxos. Distância mede distinguibilidade e não
    * mede NOMEABILIDADE — "o roxo da Ana" e "o roxo do Bruno" não servem numa
@@ -243,6 +243,14 @@
    * separar o azul-céu do azul — e foi exatamente o que a minha versão
    * anterior perdeu ao uniformizar o brilho.
    *
+   * O fundo claro da identidade lima/grafite (surface #f6f5f3, mais escuro
+   * que o branco de antes) derrubou turquesa e framboesa abaixo de 3:1. As
+   * quatro trilhas claras (âmbar, turquesa, índigo, framboesa) desceram em L
+   * até 3.2:1 sobre surface; para a turquesa não encostar no azul (0.099),
+   * ela girou de 190 para 180 graus e o azul desceu de L 0.54 para 0.48 —
+   * a alternância de luminosidade é o que os separa. Pior par medido depois:
+   * 0.1166 (âmbar x oliva). Vigiado por tests/e2e/agenda-kit-visual.spec.ts.
+   *
    * MESMO ASSIM, cor nunca é a única informação: todo lugar que usa uma
    * destas trilhas carrega junto a inicial da pessoa.
    *
@@ -251,13 +259,13 @@
    * e não dois hex que envelhecem separados.
    */
   --agenda-pessoa-1: #ac4d40;   /* telha */
-  --agenda-pessoa-2: #bd7c20;   /* âmbar */
+  --agenda-pessoa-2: #bc7b1f;   /* âmbar */
   --agenda-pessoa-3: #7e6f01;   /* oliva */
-  --agenda-pessoa-4: #11a19b;   /* turquesa */
-  --agenda-pessoa-5: #0b7a9a;   /* azul */
-  --agenda-pessoa-6: #608bda;   /* índigo */
+  --agenda-pessoa-4: #2b9988;   /* turquesa */
+  --agenda-pessoa-5: #006888;   /* azul */
+  --agenda-pessoa-6: #5d88d7;   /* índigo */
   --agenda-pessoa-7: #7b5bad;   /* violeta */
-  --agenda-pessoa-8: #cc77b1;   /* framboesa */
+  --agenda-pessoa-8: #c16da7;   /* framboesa */
 }
 
 /* ─────────────────────────────────────────────────────────────────────────
@@ -368,13 +376,13 @@
    * mentiria sobre a cor que a pessoa tem.
    */
   --agenda-pessoa-1: #ac4d40;   /* telha */
-  --agenda-pessoa-2: #bd7c20;   /* âmbar */
+  --agenda-pessoa-2: #bc7b1f;   /* âmbar */
   --agenda-pessoa-3: #7e6f01;   /* oliva */
-  --agenda-pessoa-4: #11a19b;   /* turquesa */
-  --agenda-pessoa-5: #0b7a9a;   /* azul */
-  --agenda-pessoa-6: #608bda;   /* índigo */
+  --agenda-pessoa-4: #2b9988;   /* turquesa */
+  --agenda-pessoa-5: #006888;   /* azul */
+  --agenda-pessoa-6: #5d88d7;   /* índigo */
   --agenda-pessoa-7: #7b5bad;   /* violeta */
-  --agenda-pessoa-8: #cc77b1;   /* framboesa */
+  --agenda-pessoa-8: #c16da7;   /* framboesa */
 }
 
 [data-theme="dark"] {
